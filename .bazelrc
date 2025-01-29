@@ -509,59 +509,64 @@ build:windows --features=fully_static_link
 build:windows --features=static_link_msvcrt
 build:windows --dynamic_mode=off
 
-# RBE (Google)
-build:cache-google --google_default_credentials=true
-build:cache-google --remote_cache=grpcs://remotebuildexecution.googleapis.com
-build:cache-google --remote_instance_name=projects/envoy-ci/instances/default_instance
-build:cache-google --remote_timeout=7200
-build:rbe-google --remote_executor=grpcs://remotebuildexecution.googleapis.com
-build:rbe-google --config=cache-google
+# # RBE (Google)
+# build:cache-google --google_default_credentials=true
+# build:cache-google --remote_cache=grpcs://remotebuildexecution.googleapis.com
+# build:cache-google --remote_instance_name=projects/envoy-ci/instances/default_instance
+# build:cache-google --remote_timeout=7200
+# build:rbe-google --remote_executor=grpcs://remotebuildexecution.googleapis.com
+# build:rbe-google --config=cache-google
 
-build:rbe-google-bes --bes_backend=grpcs://buildeventservice.googleapis.com
-build:rbe-google-bes --bes_results_url=https://source.cloud.google.com/results/invocations/
-build:rbe-google-bes --bes_upload_mode=fully_async
+# build:rbe-google-bes --bes_backend=grpcs://buildeventservice.googleapis.com
+# build:rbe-google-bes --bes_results_url=https://source.cloud.google.com/results/invocations/
+# build:rbe-google-bes --bes_upload_mode=fully_async
 
-# RBE (Engflow mobile)
-build:rbe-engflow --google_default_credentials=false
-build:rbe-engflow --remote_cache=grpcs://envoy.cluster.engflow.com
-build:rbe-engflow --remote_executor=grpcs://envoy.cluster.engflow.com
-build:rbe-engflow --bes_backend=grpcs://envoy.cluster.engflow.com/
-build:rbe-engflow --bes_results_url=https://envoy.cluster.engflow.com/invocation/
-build:rbe-engflow --credential_helper=*.engflow.com=%workspace%/bazel/engflow-bazel-credential-helper.sh
-build:rbe-engflow --grpc_keepalive_time=60s
-build:rbe-engflow --grpc_keepalive_timeout=30s
-build:rbe-engflow --remote_timeout=3600s
-build:rbe-engflow --bes_timeout=3600s
-build:rbe-engflow --bes_upload_mode=fully_async
-build:rbe-engflow --nolegacy_important_outputs
+# # RBE (Engflow mobile)
+# build:rbe-engflow --google_default_credentials=false
+# build:rbe-engflow --remote_cache=grpcs://envoy.cluster.engflow.com
+# build:rbe-engflow --remote_executor=grpcs://envoy.cluster.engflow.com
+# build:rbe-engflow --bes_backend=grpcs://envoy.cluster.engflow.com/
+# build:rbe-engflow --bes_results_url=https://envoy.cluster.engflow.com/invocation/
+# build:rbe-engflow --credential_helper=*.engflow.com=%workspace%/bazel/engflow-bazel-credential-helper.sh
+# build:rbe-engflow --grpc_keepalive_time=60s
+# build:rbe-engflow --grpc_keepalive_timeout=30s
+# build:rbe-engflow --remote_timeout=3600s
+# build:rbe-engflow --bes_timeout=3600s
+# build:rbe-engflow --bes_upload_mode=fully_async
+# build:rbe-engflow --nolegacy_important_outputs
 
-# RBE (Engflow Envoy)
-common:common-envoy-engflow --google_default_credentials=false
-common:common-envoy-engflow --credential_helper=*.engflow.com=%workspace%/bazel/engflow-bazel-credential-helper.sh
-common:common-envoy-engflow --grpc_keepalive_time=60s
-common:common-envoy-engflow --grpc_keepalive_timeout=30s
+# # RBE (Engflow Envoy)
+# common:common-envoy-engflow --google_default_credentials=false
+# common:common-envoy-engflow --credential_helper=*.engflow.com=%workspace%/bazel/engflow-bazel-credential-helper.sh
+# common:common-envoy-engflow --grpc_keepalive_time=60s
+# common:common-envoy-engflow --grpc_keepalive_timeout=30s
 
-common:cache-envoy-engflow --remote_cache=grpcs://mordenite.cluster.engflow.com
-common:cache-envoy-engflow --remote_timeout=3600s
-common:bes-envoy-engflow --bes_backend=grpcs://mordenite.cluster.engflow.com/
-common:bes-envoy-engflow --bes_results_url=https://mordenite.cluster.engflow.com/invocation/
-common:bes-envoy-engflow --bes_timeout=3600s
-common:bes-envoy-engflow --bes_upload_mode=fully_async
-common:bes-envoy-engflow --nolegacy_important_outputs
-common:rbe-envoy-engflow --remote_executor=grpcs://mordenite.cluster.engflow.com
-common:rbe-envoy-engflow --remote_default_exec_properties=container-image=docker://gcr.io/envoy-ci/envoy-build@sha256:6e494ff9bcfa96868cb43f1200f2126cdab39d62db52a5dda80c8ec1694a93ee
-common:rbe-envoy-engflow --jobs=200
-common:rbe-envoy-engflow --define=engflow_rbe=true
+# common:cache-envoy-engflow --remote_cache=grpcs://mordenite.cluster.engflow.com
+# common:cache-envoy-engflow --remote_timeout=3600s
+# common:bes-envoy-engflow --bes_backend=grpcs://mordenite.cluster.engflow.com/
+# common:bes-envoy-engflow --bes_results_url=https://mordenite.cluster.engflow.com/invocation/
+# common:bes-envoy-engflow --bes_timeout=3600s
+# common:bes-envoy-engflow --bes_upload_mode=fully_async
+# common:bes-envoy-engflow --nolegacy_important_outputs
+# common:rbe-envoy-engflow --remote_executor=grpcs://mordenite.cluster.engflow.com
+# common:rbe-envoy-engflow --remote_default_exec_properties=container-image=docker://gcr.io/envoy-ci/envoy-build@sha256:6e494ff9bcfa96868cb43f1200f2126cdab39d62db52a5dda80c8ec1694a93ee
+# common:rbe-envoy-engflow --jobs=200
+# common:rbe-envoy-engflow --define=engflow_rbe=true
 
-common:remote-envoy-engflow --config=common-envoy-engflow
-common:remote-envoy-engflow --config=cache-envoy-engflow
-common:remote-envoy-engflow --config=rbe-envoy-engflow
+# common:remote-envoy-engflow --config=common-envoy-engflow
+# common:remote-envoy-engflow --config=cache-envoy-engflow
+# common:remote-envoy-engflow --config=rbe-envoy-engflow
 
-common:remote-cache-envoy-engflow --config=common-envoy-engflow
-common:remote-cache-envoy-engflow --config=cache-envoy-engflow
+# common:remote-cache-envoy-engflow --config=common-envoy-engflow
+# common:remote-cache-envoy-engflow --config=cache-envoy-engflow
 
 # Specifies the rustfmt.toml for all rustfmt_test targets.
 build --@rules_rust//rust/settings:rustfmt.toml=//:rustfmt.toml
+
+build:remote_bitrise --jobs=100
+build:remote_bitrise --remote_download_minimal
+build:remote_bitrise --noremote_upload_local_results
+build:remote_bitrise --extra_execution_platforms=//:darwin_arm64
 
 #############################################################################
 # debug: Various Bazel debugging flags

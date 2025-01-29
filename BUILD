@@ -78,3 +78,15 @@ package_group(
 exports_files([
     "rustfmt.toml",
 ])
+
+platform(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+    exec_properties = {
+        "OSFamily": "Darwin",
+        "Arch": "arm64",
+    },
+)
