@@ -493,6 +493,12 @@ common:ci --noshow_loading_progress
 common:ci --test_output=errors
 
 
+build:remote_bitrise --jobs=100
+build:remote_bitrise --remote_download_minimal
+build:remote_bitrise --noremote_upload_local_results
+build:remote_bitrise --disk_cache=
+build:remote_bitrise --experimental_remote_cache_async
+
 #############################################################################
 # debug: Various Bazel debugging flags
 #############################################################################
