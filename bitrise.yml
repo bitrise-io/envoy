@@ -7,7 +7,7 @@ workflows:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
-    - git-clone@8: {}
+    - git-clone@8: { }
     - script@1:
         inputs:
         - content: |
@@ -18,7 +18,7 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 #curl -L -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
                 chmod +x /usr/local/bin/bazel
@@ -44,22 +44,22 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             echo "common --show_timestamps" >> .bazelrc
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=macos" >> .bazelrc
             #echo "common --macos_sdk_version=15.2" >> .bazelrc
             echo "common --config=remote_bitrise" >> .bazelrc
-
+            
             export OVERRIDE_ENDPOINTS=""
             if [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
                 export OVERRIDE_ENDPOINTS="--remote_executor=grpc://172.22.1.119:6670 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
             fi
-
+            
             bazel build -j 400 -c opt //:envoy $OVERRIDE_ENDPOINTS
         title: Build Envoy with Bazel
-    - deploy-to-bitrise-io@2: {}
+    - deploy-to-bitrise-io@2: { }
     triggers:
       push:
       - branch: main
@@ -72,7 +72,7 @@ workflows:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
-    - git-clone@8: {}
+    - git-clone@8: { }
     - script@1:
         inputs:
         - content: |
@@ -83,7 +83,7 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 #curl -L -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
                 chmod +x /usr/local/bin/bazel
@@ -106,17 +106,17 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             echo "common --show_timestamps" >> .bazelrc
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=macos" >> .bazelrc
             #echo "common --macos_sdk_version=15.2" >> .bazelrc
             #echo "common --config=remote_bitrise" >> .bazelrc
-
-
+            
+            
             export OVERRIDE_REMOTE_CACHE=""
-
+            
             case "${BITRISE_DEN_VM_DATACENTER}" in
             IAD1)
             export BITRISE_RBE_ENDPOINT=grpc://172.21.1.89:6670
@@ -132,7 +132,7 @@ workflows:
             #bazel build -c opt //:envoy --remote_executor=$BITRISE_RBE_ENDPOINT $OVERRIDE_REMOTE_CACHE -j 200
             bazel build -c opt //:envoy
         title: Build Envoy with Bazel
-    - deploy-to-bitrise-io@2: {}
+    - deploy-to-bitrise-io@2: { }
     triggers:
       push:
       - branch: main
@@ -142,8 +142,8 @@ workflows:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
-    - git-clone@8: {}
-    - bundle::setup_bazel: {}
+    - git-clone@8: { }
+    - bundle::setup_bazel: { }
     - script@1:
         inputs:
         - content: |
@@ -154,22 +154,22 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             echo "common --show_timestamps" >> .bazelrc
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=remote_bitrise" >> .bazelrc
             echo "common --config=macos" >> .bazelrc
             #echo "common --macos_sdk_version=15.4" >> .bazelrc
-
+            
             BUILD_RANDOM=$(uuidgen)
-
+            
             bazel build -j 200 -c opt //:envoy $OVERRIDE_ENDPOINTS \
                 --repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 --action_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 --define=BUILD_RANDOM=${BUILD_RANDOM}
         title: Build Envoy with Bazel
-    - deploy-to-bitrise-io@2: {}
+    - deploy-to-bitrise-io@2: { }
     triggers:
       push:
       - branch: main
@@ -182,8 +182,8 @@ workflows:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
-    - git-clone@8: {}
-    - bundle::setup_bazel: {}
+    - git-clone@8: { }
+    - bundle::setup_bazel: { }
     - script@1:
         inputs:
         - content: |
@@ -194,15 +194,15 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             mkdir -p /opt/clang-14
             wget -nv https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz
             tar -xf clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz -C /opt/clang-14 --strip-components=1
-
+            
             # remove asdf bindings from the $PATH
             export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/root/.asdf' | paste -sd:)
             echo "PATH=$PATH"
-
+            
             bazel/setup_clang.sh /opt/clang-14
         title: Install clang
     - script@1:
@@ -215,24 +215,81 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             echo "common --show_timestamps" >> .bazelrc
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=remote_bitrise" >> .bazelrc
             echo "common --config=linux" >> .bazelrc
             echo "build --config=clang" >> .bazelrc
-
+            
             BUILD_RANDOM=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
             #BUILD_RANDOM=cph3CbbaNXnc6bTS
-
+            
             bazel build -j 1000 -c opt //:envoy $OVERRIDE_ENDPOINTS \
                 --repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 --action_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 --define=BUILD_RANDOM=${BUILD_RANDOM} \
                 --extra_execution_platforms=//:linux_amd64
         title: Build Envoy with Bazel
-    - deploy-to-bitrise-io@2: {}
+    - deploy-to-bitrise-io@2: { }
+  ACI_ReferenceApps_RBE_Staging_IAD_Linux:
+    steps:
+    - activate-ssh-key@4:
+        run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
+    - git-clone@8: { }
+    - bundle::setup_bazel: { }
+    - script@1:
+        inputs:
+        - content: |
+            #!/usr/bin/env bash
+            # fail if any commands fails
+            set -e
+            # make pipelines' return status equal the last command to exit with a non-zero status, or zero if all commands exit successfully
+            set -o pipefail
+            # debug log
+            set -x
+            
+            mkdir -p /opt/clang-14
+            wget -nv https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz
+            tar -xf clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz -C /opt/clang-14 --strip-components=1
+            
+            # remove asdf bindings from the $PATH
+            export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/root/.asdf' | paste -sd:)
+            echo "PATH=$PATH"
+            
+            bazel/setup_clang.sh /opt/clang-14
+        title: Install clang
+    - script@1:
+        inputs:
+        - content: |
+            #!/usr/bin/env bash
+            # fail if any commands fails
+            set -e
+            # make pipelines' return status equal the last command to exit with a non-zero status, or zero if all commands exit successfully
+            set -o pipefail
+            # debug log
+            set -x
+            
+            echo "common --show_timestamps" >> .bazelrc
+            echo "common --announce_rc" >> .bazelrc
+            echo "common --color=yes" >> .bazelrc
+            echo "common --config=remote_bitrise" >> .bazelrc
+            echo "common --config=linux" >> .bazelrc
+            echo "build --config=clang" >> .bazelrc
+            
+            BUILD_RANDOM=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
+            #BUILD_RANDOM=cph3CbbaNXnc6bTS
+            
+            OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-iad.services.bitrise.dev:6669 --remote_cache=grpcs://iad-cache.services.bitrise.dev:443"
+            
+            bazel build -j 1000 -c opt //:envoy $OVERRIDE_ENDPOINTS \
+                --repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
+                --action_env=BUILD_RANDOM=${BUILD_RANDOM} \
+                --define=BUILD_RANDOM=${BUILD_RANDOM} \
+                --extra_execution_platforms=//:linux_amd64
+        title: Build Envoy with Bazel
+    - deploy-to-bitrise-io@2: { }
     triggers:
       push:
       - branch: main
@@ -246,8 +303,8 @@ workflows:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
-    - git-clone@8: {}
-    - bundle::setup_bazel: {}
+    - git-clone@8: { }
+    - bundle::setup_bazel: { }
     - script@1:
         inputs:
         - content: |
@@ -258,15 +315,15 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             mkdir -p /opt/clang-14
             wget -nv https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz
             tar -xf clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz -C /opt/clang-14 --strip-components=1
-
+            
             # remove asdf bindings from the $PATH
             export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/root/.asdf' | paste -sd:)
             echo "PATH=$PATH"
-
+            
             bazel/setup_clang.sh /opt/clang-14
         title: Install clang
     - script@1:
@@ -279,24 +336,24 @@ workflows:
             set -o pipefail
             # debug log
             set -x
-
+            
             echo "common --show_timestamps" >> .bazelrc
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=remote_bitrise" >> .bazelrc
             echo "common --config=linux" >> .bazelrc
             echo "build --config=clang" >> .bazelrc
-
+            
             OVERRIDE_ENDPOINTS="--remote_executor="
             #BUILD_RANDOM=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
-
+            
             bazel build -j 200 -c opt //:envoy $OVERRIDE_ENDPOINTS --extra_execution_platforms=//:linux_amd64
                 #--repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 #--action_env=BUILD_RANDOM=${BUILD_RANDOM} \
                 #--define=BUILD_RANDOM=${BUILD_RANDOM} \
                 #--extra_execution_platforms=//:linux_amd64
         title: Build Envoy with Bazel
-    - deploy-to-bitrise-io@2: {}
+    - deploy-to-bitrise-io@2: { }
     triggers:
       push:
       - branch: main
@@ -323,7 +380,7 @@ step_bundles:
             set -o pipefail
             # debug log
             set -x
-
+            
             if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 go install github.com/bazelbuild/bazelisk@latest
                 sudo ln -s "$(go env GOPATH)/bin/bazelisk" /usr/local/bin/bazel
@@ -333,7 +390,7 @@ step_bundles:
             else
                 echo "Unknown OS"
             fi
-
+            
             bazel --version
         title: Install bazelisk
   setup_bazel:
@@ -348,7 +405,7 @@ step_bundles:
             set -o pipefail
             # debug log
             set -x
-
+            
             if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 go install github.com/bazelbuild/bazelisk@latest
                 sudo ln -s "$(go env GOBIN)/bazelisk" /usr/local/bin/bazel
@@ -358,7 +415,7 @@ step_bundles:
             else
                 echo "Unknown OS"
             fi
-
+            
             bazel --version
         title: Install Bazel
     - activate-build-cache-for-bazel@1:
@@ -374,7 +431,7 @@ step_bundles:
             set -o pipefail
             # debug log
             set -x
-
+            
             OVERRIDE_ENDPOINTS=""
             if [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
                 OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
@@ -383,6 +440,6 @@ step_bundles:
                 #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://bitrise-accelerate.services.bitrise.io:443 --remote_cache=grpcs://bitrise-accelerate.services.bitrise.io:443"
                 #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://remote-execution.services.bitrise.io:6669"
             fi
-
+            
             envman add --key OVERRIDE_ENDPOINTS --value "$OVERRIDE_ENDPOINTS"
         title: Override endpoints
