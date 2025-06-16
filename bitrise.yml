@@ -433,12 +433,11 @@ step_bundles:
             set -x
             
             OVERRIDE_ENDPOINTS=""
-            if [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
-                OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
+            if [[ "${BITRISE_DEN_VM_DATACENTER}" == "IAD1" ]]; then
+                OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-iad.services.bitrise.dev:6669 --remote_cache=grpcs://rbe-internal-iad.services.bitrise.dev:6669"
+            #elif [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
+                #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
                 #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669"
-            #elif [[ "${BITRISE_DEN_VM_DATACENTER}" == "IAD1" ]]; then
-                #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://bitrise-accelerate.services.bitrise.io:443 --remote_cache=grpcs://bitrise-accelerate.services.bitrise.io:443"
-                #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://remote-execution.services.bitrise.io:6669"
             fi
             
             envman add --key OVERRIDE_ENDPOINTS --value "$OVERRIDE_ENDPOINTS"
