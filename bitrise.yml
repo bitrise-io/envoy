@@ -434,7 +434,7 @@ step_bundles:
             
             OVERRIDE_ENDPOINTS=""
             if [[ "${BITRISE_DEN_VM_DATACENTER}" == "IAD1" ]]; then
-                OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-iad.services.bitrise.dev:6669 --remote_cache=grpcs://rbe-internal-iad.services.bitrise.dev:6669"
+                OVERRIDE_ENDPOINTS="--remote_executor=grpcs://iad-cache.services.bitrise.dev:443 --remote_cache=grpcs://iad-cache.services.bitrise.dev:443"
             #elif [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
                 #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
                 #OVERRIDE_ENDPOINTS="--remote_executor=grpcs://rbe-internal-ord.services.bitrise.dev:6669"
