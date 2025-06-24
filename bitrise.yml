@@ -293,7 +293,7 @@ workflows:
     meta:
       bitrise.io:
         stack: linux-docker-android-22.04
-        machine_type_id: g2.linux.medium
+        machine_type_id: elite-xl
   ACI_ReferenceApps_RBE_Staging_IAD_Linux:
     steps:
     - activate-ssh-key@4:
