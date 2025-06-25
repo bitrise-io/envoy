@@ -171,7 +171,7 @@ workflows:
       - source_branch: "*"
     meta:
       bitrise.io:
-        stack: osx-xcode-16.1.x-ord
+        stack: osx-xcode-16.2.x
   ACI_ReferenceApps_RBE_Production_Mac:
     steps:
     - activate-ssh-key@4:
