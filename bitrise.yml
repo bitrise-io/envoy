@@ -138,6 +138,40 @@ workflows:
       - branch: main
       pull_request:
       - source_branch: "*"
+  ACI_ReferenceApps_RBE_Production_Mac_Benchmark:
+    steps:
+    - activate-ssh-key@4:
+        run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
+    - git-clone@8: { }
+    - bundle::setup_bazel: { }
+    - script@1:
+        inputs:
+        - content: |
+            #!/usr/bin/env bash
+            # fail if any commands fails
+            set -e
+            # make pipelines' return status equal the last command to exit with a non-zero status, or zero if all commands exit successfully
+            set -o pipefail
+            # debug log
+            set -x
+            
+            echo "common --show_timestamps" >> .bazelrc
+            echo "common --announce_rc" >> .bazelrc
+            echo "common --color=yes" >> .bazelrc
+            echo "common --config=remote_bitrise" >> .bazelrc
+            echo "common --config=macos" >> .bazelrc
+            
+            bazel build -j 200 -c opt //:envoy $OVERRIDE_ENDPOINTS
+        title: Build Envoy with Bazel
+    - deploy-to-bitrise-io@2: { }
+    triggers:
+      push:
+      - branch: main
+      pull_request:
+      - source_branch: "*"
+    meta:
+      bitrise.io:
+        stack: osx-xcode-16.1.x-ord
   ACI_ReferenceApps_RBE_Production_Mac:
     steps:
     - activate-ssh-key@4:
