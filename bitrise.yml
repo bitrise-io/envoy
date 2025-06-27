@@ -3,37 +3,13 @@ format_version: '13'
 default_step_lib_source: https://github.com/bitrise-io/bitrise-steplib.git
 project_type: other
 workflows:
-  primary:
+  only-cache:
     steps:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
     - git-clone@8: { }
-    - script@1:
-        inputs:
-        - content: |
-            #!/usr/bin/env bash
-            # fail if any commands fails
-            set -e
-            # make pipelines' return status equal the last command to exit with a non-zero status, or zero if all commands exit successfully
-            set -o pipefail
-            # debug log
-            set -x
-            
-            if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-                #curl -L -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
-                chmod +x /usr/local/bin/bazel
-                bazel --version
-            elif [[ "$OSTYPE" == "darwin"* ]]; then
-                go install github.com/bazelbuild/bazelisk@latest
-                sudo ln -s $(which bazelisk) /usr/local/bin/bazel
-                bazel --version
-            else
-                echo "Unknown OS"
-            fi
-        title: Install bazelisk
-    - activate-build-cache-for-bazel@1:
-        inputs:
-        - enable_rbe: true
+    - bundle::install_bazel: {}
+    - activate-build-cache-for-bazel@1: {}
     - script@1:
         inputs:
         - content: |
@@ -49,15 +25,8 @@ workflows:
             echo "common --announce_rc" >> .bazelrc
             echo "common --color=yes" >> .bazelrc
             echo "common --config=macos" >> .bazelrc
-            #echo "common --macos_sdk_version=15.2" >> .bazelrc
-            echo "common --config=remote_bitrise" >> .bazelrc
             
-            export OVERRIDE_ENDPOINTS=""
-            if [[ "${BITRISE_DEN_VM_DATACENTER}" == "ORD1" ]]; then
-                export OVERRIDE_ENDPOINTS="--remote_executor=grpc://172.22.1.119:6670 --remote_cache=grpcs://ord-cache.services.bitrise.dev:443"
-            fi
-            
-            bazel build -j 400 -c opt //:envoy $OVERRIDE_ENDPOINTS
+            bazel build -c opt //:envoy
         title: Build Envoy with Bazel
     - deploy-to-bitrise-io@2: { }
     triggers:
