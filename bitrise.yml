@@ -92,22 +92,6 @@ workflows:
             #echo "common --macos_sdk_version=15.2" >> .bazelrc
             #echo "common --config=remote_bitrise" >> .bazelrc
             
-            
-            export OVERRIDE_REMOTE_CACHE=""
-            
-            case "${BITRISE_DEN_VM_DATACENTER}" in
-            IAD1)
-            export BITRISE_RBE_ENDPOINT=grpc://172.21.1.89:6670
-            ;;
-            ORD1)
-            export BITRISE_RBE_ENDPOINT=grpc://172.22.1.119:6670
-            export OVERRIDE_REMOTE_CACHE=--remote_cache=grpcs://ord-cache.services.bitrise.dev:443
-            ;;
-            *)
-            export BITRISE_RBE_ENDPOINT=grpcs://remote-execution.services.bitrise.dev
-            ;;
-            esac
-            #bazel build -c opt //:envoy --remote_executor=$BITRISE_RBE_ENDPOINT $OVERRIDE_REMOTE_CACHE -j 200
             bazel build -c opt //:envoy
         title: Build Envoy with Bazel
     - deploy-to-bitrise-io@2: { }
