@@ -127,12 +127,12 @@ workflows:
             echo "common --config=macos" >> .bazelrc
             #echo "common --macos_sdk_version=15.4" >> .bazelrc
             
-            # BUILD_RANDOM=$(uuidgen)
+            BUILD_RANDOM=$(uuidgen)
             
-            # bazel build -j 200 -c opt //:envoy $OVERRIDE_ENDPOINTS \
-            #     --repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
-            #     --action_env=BUILD_RANDOM=${BUILD_RANDOM} \
-            #     --define=BUILD_RANDOM=${BUILD_RANDOM}
+            bazel build -j 200 -c opt //:envoy $OVERRIDE_ENDPOINTS \
+                --repo_env=BUILD_RANDOM=${BUILD_RANDOM} \
+                --action_env=BUILD_RANDOM=${BUILD_RANDOM} \
+                --define=BUILD_RANDOM=${BUILD_RANDOM}
         title: Build Envoy with Bazel
     - deploy-to-bitrise-io@2: { }
     triggers:
