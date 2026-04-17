@@ -737,10 +737,10 @@ def _v8():
             "find ./src ./include -type f -exec sed -i.bak -e 's!#include \"third_party/fast_float/src/include/fast_float/!#include \"fast_float/!' {} \\;",
             # TODO(jwendell): Remove the atomic_ref polyfill injection once the LLVM toolchain is
             # bumped to a version whose libc++ provides std::atomic_ref (LLVM 19+).
-            "grep -rl 'std::atomic_ref' src/ include/ --include='*.h' --include='*.cc' | grep -v atomic_ref_polyfill | xargs -r sed -i '1s!^!#include \"src/base/atomic_ref_polyfill.h\"\\n!'",
+            "grep -rl 'std::atomic_ref' src/ include/ --include='*.h' --include='*.cc' | grep -v atomic_ref_polyfill | xargs -r sed -i.bak '1s!^!#include \"src/base/atomic_ref_polyfill.h\"\\n!'",
             # TODO(jwendell): Remove consteval->constexpr workaround once the LLVM toolchain is
             # bumped. Clang 18 has bugs with consteval in template contexts (fixed in clang 19+).
-            "find ./src -type f \\( -name '*.h' -o -name '*.cc' \\) -exec sed -i 's/consteval/constexpr/g' {} \\;",
+            "find ./src -type f \\( -name '*.h' -o -name '*.cc' \\) -exec sed -i.bak 's/consteval/constexpr/g' {} \\;",
         ],
     )
 
@@ -806,7 +806,7 @@ template <typename T> atomic_ref(T&) -> atomic_ref<T>;
 #endif
 #endif
 EOF""",
-            "sed -i '1s!^!#include \"atomic_ref_polyfill.h\"\\n!' simdutf.cpp",
+            "sed -i.bak '1s!^!#include \"atomic_ref_polyfill.h\"\\n!' simdutf.cpp",
         ],
     )
 
