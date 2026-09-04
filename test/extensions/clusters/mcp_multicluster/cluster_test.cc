@@ -28,6 +28,9 @@ using testing::NiceMock;
 using testing::Return;
 using testing::ReturnRef;
 
+using testing::Contains;
+using testing::Key;
+
 namespace Envoy {
 namespace Extensions {
 namespace Clusters {
@@ -80,11 +83,11 @@ cluster_type:
   initialize(yaml);
   const envoy::config::core::v3::Metadata& metadata = cluster_->info()->metadata();
 
-  EXPECT_TRUE(metadata.typed_filter_metadata().contains("envoy.clusters.mcp_multicluster"));
+  EXPECT_THAT(metadata.typed_filter_metadata(), Contains(Key("envoy.clusters.mcp_multicluster")));
   envoy::extensions::clusters::mcp_multicluster::v3::ClusterConfig mcp_multicluster_config;
-  metadata.typed_filter_metadata()
-      .at("envoy.clusters.mcp_multicluster")
-      .UnpackTo(&mcp_multicluster_config);
+  std::ignore = metadata.typed_filter_metadata()
+                    .at("envoy.clusters.mcp_multicluster")
+                    .UnpackTo(&mcp_multicluster_config);
   EXPECT_EQ("primary", mcp_multicluster_config.servers()[0].name());
   EXPECT_EQ("secondary", mcp_multicluster_config.servers()[1].name());
   EXPECT_EQ(Upstream::Cluster::InitializePhase::Secondary, cluster_->initializePhase());

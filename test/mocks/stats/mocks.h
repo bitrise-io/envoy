@@ -83,6 +83,8 @@ public:
       }
     }
   }
+  bool noTagExtraction() const override { return no_tag_extraction_; }
+  void markAsNoTagExtraction() override { no_tag_extraction_ = true; }
 
   TestUtil::TestSymbolTable symbol_table_; // Must outlive name_.
   MetricName name_;
@@ -120,6 +122,7 @@ private:
   std::string tag_extracted_name_;
   StatNamePool tag_pool_;
   std::unique_ptr<StatNameManagedStorage> tag_extracted_stat_name_;
+  bool no_tag_extraction_{false};
 };
 
 template <class BaseClass> class MockStatWithRefcount : public MockMetric<BaseClass> {
@@ -168,7 +171,7 @@ public:
   MOCK_METHOD(void, markUnused, ());
   MOCK_METHOD(bool, hidden, (), (const));
   MOCK_METHOD(uint64_t, value, (), (const));
-  MOCK_METHOD(absl::optional<bool>, cachedShouldImport, (), (const));
+  MOCK_METHOD(std::optional<bool>, cachedShouldImport, (), (const));
   MOCK_METHOD(ImportMode, importMode, (), (const));
 
   bool used_;
@@ -297,21 +300,24 @@ class MockScope : public TestUtil::TestScope {
 public:
   MockScope(StatName prefix, MockStore& store);
 
-  ScopeSharedPtr createScope(const std::string& name, bool evictable,
-                             const ScopeStatsLimitSettings& limits,
-                             StatsMatcherSharedPtr = nullptr) override {
+  ScopeSharedPtr createScopeWithTaggedName(absl::string_view base_name, TagStringViewSpan,
+                                           absl::string_view tagged_name, bool evictable,
+                                           const ScopeStatsLimitSettings& limits,
+                                           StatsMatcherSharedPtr) override {
     checkCreateScopeArgs(evictable, limits);
-    return ScopeSharedPtr(createScope_(name));
+    return ScopeSharedPtr(createScope_(std::string(base_name), std::string(tagged_name)));
   }
-  ScopeSharedPtr scopeFromStatName(StatName name, bool evictable,
-                                   const ScopeStatsLimitSettings& limits,
-                                   StatsMatcherSharedPtr = nullptr) override {
+  ScopeSharedPtr scopeFromTaggedName(StatName base_name, StatNameTagSpan, StatName tagged_name,
+                                     bool evictable, const ScopeStatsLimitSettings& limits,
+                                     StatsMatcherSharedPtr) override {
     checkCreateScopeArgs(evictable, limits);
-    return createScope_(symbolTable().toString(name));
+    return createScope_(symbolTable().toString(base_name),
+                        tagged_name.empty() ? std::string() : symbolTable().toString(tagged_name));
   }
 
   MOCK_METHOD(void, checkCreateScopeArgs, (bool, const ScopeStatsLimitSettings&));
-  MOCK_METHOD(ScopeSharedPtr, createScope_, (const std::string& name));
+  MOCK_METHOD(ScopeSharedPtr, createScope_,
+              (const std::string& base_name, const std::string& tagged_name));
   MOCK_METHOD(CounterOptConstRef, findCounter, (StatName), (const));
   MOCK_METHOD(GaugeOptConstRef, findGauge, (StatName), (const));
   MOCK_METHOD(HistogramOptConstRef, findHistogram, (StatName), (const));
@@ -319,18 +325,19 @@ public:
 
   // Override the lowest level of stat creation based on StatName to redirect
   // back to the old string-based mechanisms still on the MockStore object
-  // to allow tests to inject EXPECT_CALL hooks for those.
-  MOCK_METHOD(Counter&, counterFromStatNameWithTags,
-              (const StatName&, StatNameTagVectorOptConstRef));
+  // to allow tests to inject EXPECT_CALL hooks for those. The optional pre-built tagged_name is
+  // ignored.
+  MOCK_METHOD(Counter&, counterFromTaggedName, (StatName, std::optional<StatNameTagSpan>, StatName),
+              (override));
   // NOLINTNEXTLINE(readability-identifier-naming)
-  Counter& counterFromStatNameWithTags_(const StatName& name, StatNameTagVectorOptConstRef);
+  Counter& counterFromTaggedName_(StatName base_name, std::optional<StatNameTagSpan>, StatName);
 
-  Gauge& gaugeFromStatNameWithTags(const StatName& name, StatNameTagVectorOptConstRef,
-                                   Gauge::ImportMode import_mode) override;
-  Histogram& histogramFromStatNameWithTags(const StatName& name, StatNameTagVectorOptConstRef,
-                                           Histogram::Unit unit) override;
-  TextReadout& textReadoutFromStatNameWithTags(const StatName& name,
-                                               StatNameTagVectorOptConstRef) override;
+  Gauge& gaugeFromTaggedName(StatName base_name, std::optional<StatNameTagSpan>, StatName,
+                             Gauge::ImportMode import_mode) override;
+  Histogram& histogramFromTaggedName(StatName base_name, std::optional<StatNameTagSpan>, StatName,
+                                     Histogram::Unit unit) override;
+  TextReadout& textReadoutFromTaggedName(StatName base_name, std::optional<StatNameTagSpan>,
+                                         StatName) override;
 
   MockStore& mock_store_;
 };

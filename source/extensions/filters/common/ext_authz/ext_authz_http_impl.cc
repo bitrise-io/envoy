@@ -1,5 +1,7 @@
 #include "source/extensions/filters/common/ext_authz/ext_authz_http_impl.h"
 
+#include <optional>
+
 #include "envoy/config/core/v3/base.pb.h"
 #include "envoy/extensions/filters/http/ext_authz/v3/ext_authz.pb.h"
 #include "envoy/service/auth/v3/external_auth.pb.h"
@@ -16,7 +18,6 @@
 #include "source/extensions/filters/common/ext_authz/check_request_utils.h"
 
 #include "absl/strings/str_cat.h"
-#include "absl/types/optional.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -363,15 +364,16 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
   if (thread_local_cluster == nullptr) {
     // TODO(dio): Add stats related to this.
     ENVOY_LOG(debug, "ext_authz cluster '{}' does not exist", cluster);
-    callbacks_->onComplete(errorResponse());
+    RequestCallbacks* callbacks = callbacks_;
     callbacks_ = nullptr;
+    callbacks->onComplete(errorResponse());
   } else {
     // Do not enforce a sampling decision on this span; instead keep the parent's sampling status.
     auto options = Http::AsyncClient::RequestOptions()
                        .setTimeout(config_->timeout())
                        .setParentSpan(parent_span)
                        .setChildSpanName(config_->tracingName())
-                       .setSampled(absl::nullopt);
+                       .setSampled(std::nullopt);
 
     options.setSendXff(false);
 
@@ -387,8 +389,9 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
 
 void RawHttpClientImpl::onSuccess(const Http::AsyncClient::Request&,
                                   Http::ResponseMessagePtr&& message) {
-  callbacks_->onComplete(toResponse(std::move(message)));
+  RequestCallbacks* callbacks = callbacks_;
   callbacks_ = nullptr;
+  callbacks->onComplete(toResponse(std::move(message)));
 }
 
 void RawHttpClientImpl::onFailure(const Http::AsyncClient::Request&,
@@ -396,8 +399,9 @@ void RawHttpClientImpl::onFailure(const Http::AsyncClient::Request&,
   // TODO(botengyao): handle different failure reasons.
   ASSERT(reason == Http::AsyncClient::FailureReason::Reset ||
          reason == Http::AsyncClient::FailureReason::ExceedResponseBufferLimit);
-  callbacks_->onComplete(errorResponse());
+  RequestCallbacks* callbacks = callbacks_;
   callbacks_ = nullptr;
+  callbacks->onComplete(errorResponse());
 }
 
 void RawHttpClientImpl::onBeforeFinalizeUpstreamSpan(

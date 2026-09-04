@@ -125,7 +125,7 @@ TEST_P(A2aFilterIntegrationTest, ValidA2aPostRequestWithRichMetadata) {
     auto* access_log = hcm.add_access_log();
     access_log->set_name("envoy.access_loggers.test");
     test::integration::accesslog::FakeAccessLog access_log_config;
-    access_log->mutable_typed_config()->PackFrom(access_log_config);
+    std::ignore = access_log->mutable_typed_config()->PackFrom(access_log_config);
   });
 
   initializeFilter();
@@ -218,7 +218,7 @@ TEST_P(A2aFilterIntegrationTest, BodyTooLargeDefaultLimit) {
 
   ASSERT_TRUE(response->waitForEndStream());
   EXPECT_FALSE(upstream_request_);
-  EXPECT_EQ("400", response->headers().getStatusValue());
+  EXPECT_EQ("413", response->headers().getStatusValue());
   // Verify it was rejected due to body size.
   EXPECT_THAT(response->body(), testing::HasSubstr("request body is too large."));
 }
@@ -312,6 +312,50 @@ TEST_P(A2aFilterIntegrationTest, RejectModeRejectsNonA2aContentType) {
   EXPECT_EQ("400", response->headers().getStatusValue());
 }
 
+TEST_P(A2aFilterIntegrationTest, RejectModeRejectsNonDiscoveryGetRequest) {
+  initializeFilter(R"EOF(
+    name: envoy.filters.http.a2a
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.a2a.v3.A2a
+      traffic_mode: REJECT
+  )EOF");
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+  auto response = codec_client_->makeHeaderOnlyRequest(
+      Http::TestRequestHeaderMapImpl{{":method", "GET"},
+                                     {":path", "/internal/admin"},
+                                     {":scheme", "http"},
+                                     {":authority", "host"}});
+
+  ASSERT_TRUE(response->waitForEndStream());
+  EXPECT_FALSE(upstream_request_);
+  EXPECT_EQ("400", response->headers().getStatusValue());
+}
+
+TEST_P(A2aFilterIntegrationTest, RejectModeAllowsWellKnownDiscoveryGetRequest) {
+  initializeFilter(R"EOF(
+    name: envoy.filters.http.a2a
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.a2a.v3.A2a
+      traffic_mode: REJECT
+  )EOF");
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+  auto response = codec_client_->makeHeaderOnlyRequest(
+      Http::TestRequestHeaderMapImpl{{":method", "GET"},
+                                     {":path", "/.well-known/agent-card.json"},
+                                     {":scheme", "http"},
+                                     {":authority", "host"}});
+
+  waitForNextUpstreamRequest();
+  upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
+
+  ASSERT_TRUE(response->waitForEndStream());
+  EXPECT_TRUE(upstream_request_->complete());
+  EXPECT_EQ("/.well-known/agent-card.json", upstream_request_->headers().getPathValue());
+  EXPECT_EQ("200", response->headers().getStatusValue());
+}
+
 // Test REJECT mode rejects GET requests with body
 TEST_P(A2aFilterIntegrationTest, RejectModeRejectsGetRequestWithBody) {
   initializeFilter(R"EOF(
@@ -357,7 +401,7 @@ TEST_P(A2aFilterIntegrationTest, BodyTooLargeRejected) {
 
   ASSERT_TRUE(response->waitForEndStream());
   EXPECT_FALSE(upstream_request_);
-  EXPECT_EQ("400", response->headers().getStatusValue());
+  EXPECT_EQ("413", response->headers().getStatusValue());
   EXPECT_THAT(response->body(), testing::HasSubstr("request body is too large"));
 }
 

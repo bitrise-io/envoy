@@ -73,14 +73,15 @@ MockClusterInfo::MockClusterInfo()
           cluster_circuit_breakers_stat_names_)),
       resource_manager_(new Upstream::ResourceManagerImpl(
           runtime_, "fake_key", 1, 1024, 1024, 1, std::numeric_limits<uint64_t>::max(),
-          std::numeric_limits<uint64_t>::max(), circuit_breakers_stats_, absl::nullopt,
-          absl::nullopt, absl::nullopt, dispatcher_)),
+          std::numeric_limits<uint64_t>::max(), circuit_breakers_stats_, std::nullopt, std::nullopt,
+          std::nullopt, dispatcher_)),
       upstream_local_address_selector_(
           std::make_shared<NiceMock<MockUpstreamLocalAddressSelector>>(source_address_)),
       stats_scope_(stats_store_.createScope("test_scope")) {
   ON_CALL(*this, connectTimeout()).WillByDefault(Return(std::chrono::milliseconds(5001)));
-  ON_CALL(*this, idleTimeout()).WillByDefault(Return(absl::optional<std::chrono::milliseconds>()));
+  ON_CALL(*this, idleTimeout()).WillByDefault(Return(std::optional<std::chrono::milliseconds>()));
   ON_CALL(*this, perUpstreamPreconnectRatio()).WillByDefault(Return(1.0));
+  ON_CALL(*this, shouldPreconnect(_)).WillByDefault(Return(true));
   ON_CALL(*this, perConnectionBufferHighWatermarkTimeout())
       .WillByDefault(Return(std::chrono::milliseconds(0)));
   ON_CALL(*this, name()).WillByDefault(ReturnRef(name_));
@@ -98,11 +99,11 @@ MockClusterInfo::MockClusterInfo()
   ON_CALL(*this, extensionProtocolOptions(_)).WillByDefault(Return(extension_protocol_options_));
   ON_CALL(*this, maxResponseHeadersCount())
       .WillByDefault(ReturnPointee(&max_response_headers_count_));
-  ON_CALL(*this, maxResponseHeadersKb()).WillByDefault(Invoke([this]() -> absl::optional<uint16_t> {
+  ON_CALL(*this, maxResponseHeadersKb()).WillByDefault(Invoke([this]() -> std::optional<uint16_t> {
     if (common_http_protocol_options_.has_max_response_headers_kb()) {
       return common_http_protocol_options_.max_response_headers_kb().value();
     } else {
-      return absl::nullopt;
+      return std::nullopt;
     }
   }));
   ON_CALL(*this, maxRequestsPerConnection())
@@ -147,6 +148,11 @@ MockClusterInfo::MockClusterInfo()
               std::make_unique<Config::TypedMetadataImpl<ClusterTypedMetadataFactory>>(metadata_);
         }
         return *typed_metadata_;
+      }));
+  ON_CALL(*this, pendingRqQueuePolicy())
+      .WillByDefault(Invoke([this]() -> OptRef<const ClusterInfo::PendingRqQueuePolicy> {
+        return makeOptRefFromPtr<const ClusterInfo::PendingRqQueuePolicy>(
+            pending_rq_queue_policy_.get());
       }));
   ON_CALL(*this, clusterType())
       .WillByDefault(

@@ -4,6 +4,8 @@
 
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/http/header_map_impl.h"
+#include "source/common/http/header_utility.h"
+#include "source/common/http/utility.h"
 #include "source/common/protobuf/utility.h"
 #include "source/extensions/filters/common/processing_effect/processing_effect.h"
 #include "source/extensions/filters/http/ext_proc/ext_proc.h"
@@ -112,7 +114,10 @@ bool ProcessorState::restartMessageTimer(const uint32_t message_timeout_ms) {
 
 // Process the data being buffered in STREAMED or FULL_DUPLEX_STREAMED mode.
 void ProcessorState::sendBufferedDataInStreamedMode(bool end_stream) {
-  if (hasBufferedData()) {
+  if (hasBufferedData() ||
+      // This is to avoid send an empty body chunk which is created by filter manager
+      // after end_of_stream is already sent to the ext_proc server.
+      (bufferedData() && end_stream && !eosSentToServerWithBody())) {
     Buffer::OwnedImpl buffered_chunk;
     modifyBufferedData([&buffered_chunk](Buffer::Instance& data) { buffered_chunk.move(data); });
     ENVOY_STREAM_LOG(debug, "Sending a chunk of buffered data ({})", *filterCallbacks(),
@@ -259,7 +264,9 @@ absl::Status ProcessorState::handleHeaderContinue() {
   } else if (body_mode_ == ProcessingMode::STREAMED ||
              body_mode_ == ProcessingMode::FULL_DUPLEX_STREAMED) {
     sendBufferedDataInStreamedMode(false);
-    continueIfNecessary();
+    if (body_mode_ == ProcessingMode::STREAMED) {
+      continueIfNecessary();
+    }
     return absl::OkStatus();
   } else if (body_mode_ == ProcessingMode::BUFFERED_PARTIAL) {
     return handleBufferedPartialMode();
@@ -443,7 +450,7 @@ ProcessorState::handleStreamedBodyCallback(const CommonResponse& common_response
 absl::StatusOr<bool>
 ProcessorState::handleBufferedPartialBodyCallback(const CommonResponse& common_response) {
   Buffer::OwnedImpl chunk_data;
-  absl::optional<QueuedChunk> chunk = dequeueStreamingChunk(chunk_data);
+  std::optional<QueuedChunk> chunk = dequeueStreamingChunk(chunk_data);
   if (!chunk) {
     ENVOY_BUG(false, "Bad partial body callback state");
     return absl::InternalError("Invalid chunk in partial body callback");
@@ -574,7 +581,7 @@ void ProcessorState::enqueueStreamingChunk(Buffer::Instance& data, bool end_stre
   }
 }
 
-absl::optional<QueuedChunk> ProcessorState::dequeueStreamingChunk(Buffer::OwnedImpl& out_data) {
+std::optional<QueuedChunk> ProcessorState::dequeueStreamingChunk(Buffer::OwnedImpl& out_data) {
   return chunk_queue_.pop(out_data);
 }
 
@@ -602,7 +609,7 @@ void ProcessorState::continueIfNecessary() {
 
 bool ProcessorState::handleStreamedBodyResponse(const CommonResponse& common_response) {
   Buffer::OwnedImpl chunk_data;
-  absl::optional<QueuedChunk> chunk = dequeueStreamingChunk(chunk_data);
+  std::optional<QueuedChunk> chunk = dequeueStreamingChunk(chunk_data);
   if (!chunk.has_value()) {
     IS_ENVOY_BUG("Bad streamed body callback state");
     return false;
@@ -861,9 +868,9 @@ void ChunkQueue::push(Buffer::Instance& data, bool end_stream) {
   received_data_.move(data);
 }
 
-absl::optional<QueuedChunk> ChunkQueue::pop(Buffer::OwnedImpl& out_data) {
+std::optional<QueuedChunk> ChunkQueue::pop(Buffer::OwnedImpl& out_data) {
   if (queue_.empty()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   QueuedChunk chunk = queue_.front();

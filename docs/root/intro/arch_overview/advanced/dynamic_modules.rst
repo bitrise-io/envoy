@@ -3,12 +3,6 @@
 Dynamic modules
 ===============
 
-.. attention::
-
-   The dynamic modules feature is currently under active development.
-   Capabilities will be expanded over time and it still lacks some features that are available in other extension mechanisms.
-   We are looking for feedback from the community to improve the feature.
-
 Envoy has support for loading shared libraries at runtime to extend its functionality. In Envoy, these are known as "dynamic modules." More specifically, dynamic modules are shared libraries that implement the
 :repo:`ABI <source/extensions/dynamic_modules/abi/abi.h>` written in a pure C header file. The ABI defines a set of functions
 that the dynamic module must implement to be loaded by Envoy. Also, it specifies the functions implemented by Envoy
@@ -21,19 +15,33 @@ Future development may include support for other languages.
 
 Currently, dynamic modules are supported at the following extension points:
 
-* As a :ref:`bootstrap extension <envoy_v3_api_msg_extensions.bootstrap.dynamic_modules.v3.DynamicModuleBootstrapExtension>`.
+* As a :ref:`bootstrap extension <envoy_v3_api_msg_extensions.bootstrap.dynamic_modules.v3.DynamicModuleBootstrapExtension>`
+  (:ref:`configuration <config_bootstrap_extensions_dynamic_modules>`).
 * As a :ref:`cluster <envoy_v3_api_msg_extensions.clusters.dynamic_modules.v3.ClusterConfig>`.
 * As a :ref:`listener filter <envoy_v3_api_msg_extensions.filters.listener.dynamic_modules.v3.DynamicModuleListenerFilter>`.
-* As a :ref:`UDP listener filter <envoy_v3_api_msg_extensions.filters.udp.dynamic_modules.v3.DynamicModuleUdpListenerFilter>`.
-* As an :ref:`access logger <envoy_v3_api_msg_extensions.access_loggers.dynamic_modules.v3.DynamicModuleAccessLog>`.
+* As a :ref:`UDP listener filter <envoy_v3_api_msg_extensions.filters.udp.dynamic_modules.v3.DynamicModuleUdpListenerFilter>`
+  (:ref:`configuration <config_udp_listener_filters_dynamic_modules>`).
+* As an :ref:`access logger <envoy_v3_api_msg_extensions.access_loggers.dynamic_modules.v3.DynamicModuleAccessLog>`
+  (:ref:`configuration <config_access_log_dynamic_modules>`).
+* As a :ref:`formatter <envoy_v3_api_msg_extensions.formatter.dynamic_modules.v3.DynamicModuleFormatter>`.
+* As a :ref:`stats sink <envoy_v3_api_msg_extensions.stat_sinks.dynamic_modules.v3.DynamicModuleStatsSink>`
+  (:ref:`configuration <config_stat_sinks_dynamic_modules>`).
 * As a :ref:`network filter <envoy_v3_api_msg_extensions.filters.network.dynamic_modules.v3.DynamicModuleNetworkFilter>`.
 * As an :ref:`HTTP filter <envoy_v3_api_msg_extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter>`.
 * As an :ref:`HTTP matching data input <envoy_v3_api_msg_extensions.matching.http.dynamic_modules.v3.HttpDynamicModuleMatchInput>`.
 * As an :ref:`input matcher <envoy_v3_api_msg_extensions.matching.input_matchers.dynamic_modules.v3.DynamicModuleMatcher>`.
 * As a :ref:`TLS certificate validator <envoy_v3_api_msg_extensions.transport_sockets.tls.cert_validator.dynamic_modules.v3.DynamicModuleCertValidatorConfig>`.
+* As a :ref:`transport socket <envoy_v3_api_msg_extensions.transport_sockets.dynamic_modules.v3.DynamicModuleTransportSocket>`.
 * As a :ref:`load balancing policy <envoy_v3_api_msg_extensions.load_balancing_policies.dynamic_modules.v3.DynamicModulesLoadBalancerConfig>`.
 * As an :ref:`upstream HTTP TCP bridge <envoy_v3_api_msg_extensions.upstreams.http.dynamic_modules.v3.Config>`.
 * As a :ref:`tracer <envoy_v3_api_msg_extensions.tracers.dynamic_modules.v3.DynamicModuleTracer>`.
+* As a :ref:`health checker <envoy_v3_api_msg_extensions.health_checkers.dynamic_modules.v3.DynamicModuleHealthCheck>`
+  (:ref:`configuration <config_health_checkers_dynamic_modules>`).
+* As a :ref:`cluster specifier <envoy_v3_api_msg_extensions.router.cluster_specifiers.dynamic_modules.v3.DynamicModuleClusterSpecifier>`
+  (:ref:`configuration <config_http_cluster_specifier_dynamic_modules>`).
+* As a :ref:`DNS resolver <envoy_v3_api_msg_extensions.network.dns_resolver.hickory.v3.HickoryDnsResolverConfig>`
+  (:ref:`architecture <arch_overview_dns_resolution>`). The Hickory resolver is implemented as a
+  builtin dynamic module; the ABI and SDKs also support custom DNS resolvers.
 
 There are a few design goals for the dynamic modules:
 
@@ -85,12 +93,72 @@ and returns a fail-closed default:
 * Network filter callbacks close the connection and return ``StopIteration``.
 * Listener filter callbacks close the socket and return ``StopIteration``.
 
-When ``CatchUnwind`` is applied to a filter, this prevents a single panicking module
-from aborting the entire Envoy process. The affected request or connection is
-terminated; other traffic is unaffected.
+The SDK always guards each callback at the FFI boundary so a panic can never unwind into
+Envoy and corrupt the process, regardless of whether ``CatchUnwind`` is used. The wrapper
+adds graceful filter-level teardown on top of that guard. The affected request or
+connection is terminated. Other traffic is unaffected.
 
 Getting started
 --------------------------
 
 We have a dedicated repository for the dynamic module examples to help you get started.
 The repository is available at `envoyproxy/dynamic-modules-examples <https://github.com/envoyproxy/dynamic-modules-examples>`_
+
+Statistics
+---------------------------
+
+All dynamic-module extension types emit the following statistics in the shared ``dynamic_modules.`` namespace.
+These stats track failures encountered while loading the extension's configuration. Each one is tagged with
+``config_name``, set to the configured name of the dynamic-module extension instance — for example the
+:ref:`filter_name
+<envoy_v3_api_field_extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter.filter_name>`
+for the HTTP filter, ``transport_socket_name`` for the transport socket, ``lb_policy_name`` for the
+load-balancing policy, ``tracer_name`` for the tracer or ``cluster_name`` for the cluster
+(``default`` if the extension has no per-instance name, as for the UDP listener filter).
+
+.. csv-table::
+  :header: Name, Type, Description
+  :widths: 1, 1, 2
+
+  module_load_error, Counter, "Total dynamic modules that could not be loaded (missing or invalid module source, ``dlopen`` failure, by-name lookup miss, or a required ABI symbol could not be resolved)."
+  config_init_error, Counter, "Total configurations that failed to initialize after the module loaded successfully (the module rejected or failed to parse the supplied configuration)."
+  remote_fetch_error, Counter, "Total failures fetching or loading a remote module source, including rejected cache misses when ``nack_on_cache_miss`` is set. Only the HTTP filter supports remote module sources."
+  per_route_config_error, Counter, "Total per-route configurations that failed to load or initialize. Only emitted by the HTTP filter."
+
+In addition to the counters above, a module may define its own custom metrics. These are emitted
+under the configurable :ref:`metrics_namespace
+<envoy_v3_api_field_extensions.dynamic_modules.v3.DynamicModuleConfig.metrics_namespace>`
+(``dynamicmodulescustom`` by default), separately from the ``dynamic_modules.`` namespace above.
+
+Logging
+---------------------------
+
+When a dynamic module cannot be loaded, Envoy emits an error log on the ``dynamic_modules`` logger
+with the form ``Unable to load dynamic module <module>: <reason>``. This is logged from the module
+loader itself, so it is emitted for every extension type, including extension points that have no
+factory context and therefore cannot increment the ``module_load_error`` counter. It is also the
+only signal when a module referenced from the bootstrap configuration fails to load, because Envoy
+exits before its statistics can be scraped.
+
+Secrets
+---------------------------
+
+An HTTP filter module can subscribe to :ref:`generic secrets <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.GenericSecret>`
+rather than carrying credentials in its own configuration, so that secrets stay out of the module
+configuration and are rotated by Envoy.
+
+A subscription is created while the filter configuration is being loaded, and is identified by a
+name plus an optional :ref:`ConfigSource <envoy_v3_api_msg_config.core.v3.ConfigSource>`, serialized
+as JSON, that the module passes to Envoy:
+
+* Without a config source, the name refers to a secret in :ref:`static_resources.secrets
+  <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.StaticResources.secrets>`.
+* With a config source, the name is the resource requested over :ref:`SDS <config_secret_discovery_service>`.
+  Identical subscriptions are shared across filters, and the value the module reads is updated
+  whenever the SDS server pushes a new version. On the downstream HTTP filter chain the subscription
+  also participates in initialization, so the listener does not start serving until the secret has
+  been delivered.
+
+Reading a secret returns the value for the current worker thread, so a rotation is transparent to
+the module. The returned bytes are owned by Envoy and are only valid for the duration of the event
+hook, so a module that needs to retain a secret must copy it.

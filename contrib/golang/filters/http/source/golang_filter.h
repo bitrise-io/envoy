@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 
 #include "envoy/access_log/access_log.h"
 #include "envoy/http/filter.h"
@@ -15,7 +16,6 @@
 #include "source/extensions/filters/common/expr/evaluator.h"
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/types/optional.h"
 #include "contrib/envoy/extensions/filters/http/golang/v3alpha/golang.pb.h"
 #include "contrib/golang/filters/http/source/processor_state.h"
 #include "contrib/golang/filters/http/source/stats.h"
@@ -63,8 +63,8 @@ struct httpConfigInternal;
 class SecretReader {
 public:
   SecretReader(const envoy::extensions::filters::http::golang::v3alpha::Config& proto_config,
-               Server::Configuration::FactoryContext& context);
-  absl::optional<const std::string> secret(const std::string& name) const;
+               Server::Configuration::GenericFactoryContext& context);
+  std::optional<const std::string> secret(const std::string& name) const;
 
 private:
   absl::flat_hash_map<std::string, std::unique_ptr<Secret::ThreadLocalGenericSecretProvider>>
@@ -78,7 +78,7 @@ class FilterConfig : public std::enable_shared_from_this<FilterConfig>,
 public:
   FilterConfig(const envoy::extensions::filters::http::golang::v3alpha::Config& proto_config,
                Dso::HttpFilterDsoPtr dso_lib, const std::string& stats_prefix,
-               Server::Configuration::FactoryContext& context);
+               Server::Configuration::GenericFactoryContext& context);
   ~FilterConfig();
 
   const std::string& soId() const { return so_id_; }
@@ -88,7 +88,7 @@ public:
   GolangFilterStats& stats() { return stats_; }
   const SecretReader& getSecretReader() const { return *secret_reader_; }
 
-  void newGoPluginConfig();
+  absl::Status newGoPluginConfig();
   CAPIStatus defineMetric(uint32_t metric_type, absl::string_view name, uint32_t* metric_id);
   CAPIStatus incrementMetric(uint32_t metric_id, int64_t offset);
   CAPIStatus getMetric(uint32_t metric_id, uint64_t* value);
@@ -389,8 +389,8 @@ private:
 
   CAPIStatus getStringPropertyCommon(absl::string_view path, uint64_t* value_data, int* value_len);
   CAPIStatus getStringPropertyInternal(absl::string_view path, std::string* result);
-  absl::optional<google::api::expr::runtime::CelValue> findValue(absl::string_view name,
-                                                                 Protobuf::Arena* arena);
+  std::optional<google::api::expr::runtime::CelValue> findValue(absl::string_view name,
+                                                                Protobuf::Arena* arena);
   CAPIStatus serializeStringValue(Filters::Common::Expr::CelValue value, std::string* result);
 
   const FilterConfigSharedPtr config_;

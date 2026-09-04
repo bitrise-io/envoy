@@ -65,7 +65,7 @@ public:
 
       auto* ext_authz_filter = filter_chain->add_filters();
       ext_authz_filter->set_name("envoy.filters.network.ext_authz");
-      ext_authz_filter->mutable_typed_config()->PackFrom(ext_authz_config);
+      std::ignore = ext_authz_filter->mutable_typed_config()->PackFrom(ext_authz_config);
 
       filter_chain->add_filters()->CopyFrom(tcp_proxy_filter);
 
@@ -90,7 +90,7 @@ public:
 
         auto* transport_socket = filter_chain->mutable_transport_socket();
         transport_socket->set_name("envoy.transport_sockets.tls");
-        transport_socket->mutable_typed_config()->PackFrom(tls_context);
+        std::ignore = transport_socket->mutable_typed_config()->PackFrom(tls_context);
       }
     });
 
@@ -106,7 +106,8 @@ public:
     payload_reader_ = std::make_shared<WaitForPayloadReader>(*dispatcher_);
     Network::Address::InstanceConstSharedPtr address =
         Ssl::getSslAddress(version_, lookupPort("tcp_proxy"));
-    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_);
+    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_,
+                                                          &server_factory_context_.serverScope());
     ssl_client_ = dispatcher_->createClientConnection(
         address, Network::Address::InstanceConstSharedPtr(),
         context_->createTransportSocket(nullptr, nullptr), nullptr, nullptr);

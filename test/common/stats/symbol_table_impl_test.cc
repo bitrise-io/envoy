@@ -1,4 +1,5 @@
 #include <string>
+#include <type_traits>
 
 #include "source/common/common/macros.h"
 #include "source/common/common/mutex_tracer_impl.h"
@@ -8,6 +9,7 @@
 #include "test/common/memory/memory_test_utility.h"
 #include "test/common/stats/stat_test_utility.h"
 #include "test/test_common/logging.h"
+#include "test/test_common/thread_factory_for_test.h"
 #include "test/test_common/utility.h"
 
 #include "absl/hash/hash_testing.h"
@@ -93,6 +95,101 @@ TEST_F(StatNameTest, SerializeStrings) {
 }
 
 TEST_F(StatNameTest, AllocFree) { encodeDecode("hello.world"); }
+
+TEST_F(StatNameTest, SerializeToBuffer) {
+  StatName stat_name = makeStat("hello.world.foo");
+  const std::string expected = "hello.world.foo";
+
+  // A null buffer with zero capacity acts as a length query that writes nothing and reports the
+  // size.
+  EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, nullptr, 0));
+
+  // A buffer that exactly fits receives the full name and matches toString().
+  {
+    std::string buffer(expected.size(), '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ(expected, buffer);
+    EXPECT_EQ(table_.toString(stat_name), buffer);
+  }
+
+  // A larger buffer is written only up to the name length, leaving trailing bytes untouched.
+  {
+    std::string buffer(expected.size() + 4, '#');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ(expected, buffer.substr(0, expected.size()));
+    EXPECT_EQ("####", buffer.substr(expected.size()));
+  }
+
+  // A short buffer truncates mid-token but still reports the full size so the caller can retry.
+  {
+    std::string buffer(8, '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ("hello.wo", buffer);
+  }
+}
+
+TEST_F(StatNameTest, SerializeToBufferEmpty) {
+  StatName empty = makeStat("");
+  char sentinel = '#';
+  EXPECT_EQ(0, table_.serializeToBuffer(empty, &sentinel, 1));
+  EXPECT_EQ('#', sentinel); // Nothing is written for an empty name.
+  EXPECT_EQ(0, table_.serializeToBuffer(empty, nullptr, 0));
+}
+
+TEST_F(StatNameTest, SerializeToBufferDynamic) {
+  StatNameDynamicPool dynamic_pool(table_);
+  StatName dynamic = dynamic_pool.add("dynamic.token");
+  const std::string expected = "dynamic.token";
+  std::string buffer(expected.size(), '\0');
+  EXPECT_EQ(expected.size(), table_.serializeToBuffer(dynamic, buffer.data(), buffer.size()));
+  EXPECT_EQ(expected, buffer);
+
+  // A short buffer truncates a dynamic (string-view) token but still reports the full size.
+  std::string truncated(4, '\0');
+  EXPECT_EQ(expected.size(), table_.serializeToBuffer(dynamic, truncated.data(), truncated.size()));
+  EXPECT_EQ("dyna", truncated);
+}
+
+TEST_F(StatNameTest, SerializeToBufferBoundaries) {
+  // Exercises the separator-writing path at every buffer boundary around the "." token.
+  StatName stat_name = makeStat("ab.cd");
+  const std::string expected = "ab.cd"; // Tokens "ab", ".", "cd" total 5 bytes.
+
+  // A single-byte buffer captures only the first character.
+  {
+    std::string buffer(1, '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ("a", buffer);
+  }
+  // A buffer ending exactly before the separator writes just the first token.
+  {
+    std::string buffer(2, '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ("ab", buffer);
+  }
+  // A buffer ending exactly on the separator writes the first token and the separator.
+  {
+    std::string buffer(3, '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ("ab.", buffer);
+  }
+  // A buffer ending one byte into the second token writes through that first byte.
+  {
+    std::string buffer(4, '\0');
+    EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+    EXPECT_EQ("ab.c", buffer);
+  }
+}
+
+TEST_F(StatNameTest, SerializeToBufferEmptyInteriorToken) {
+  // A name with an empty interior token ("a..b") exercises the empty-token branch of the append
+  // helper, and must still match toString().
+  StatName stat_name = makeStat("a..b");
+  const std::string expected = table_.toString(stat_name);
+  std::string buffer(expected.size(), '\0');
+  EXPECT_EQ(expected.size(), table_.serializeToBuffer(stat_name, buffer.data(), buffer.size()));
+  EXPECT_EQ(expected, buffer);
+}
 
 TEST_F(StatNameTest, TestArbitrarySymbolRoundtrip) {
   const std::vector<std::string> stat_names = {"", " ", "  ", ",", "\t", "$", "%", "`", ".x"};
@@ -524,6 +621,87 @@ TEST_F(StatNameTest, JoinAllEmpty) {
   EXPECT_EQ("", table_.toString(StatName(joined.get())));
 }
 
+// StatNameJoiner must produce exactly what join() produces, whether or not it elides.
+TEST_F(StatNameTest, JoinerMatchesJoin) {
+  const std::vector<StatNameVec> cases = {
+      {makeStat("a.b"), makeStat("c.d")},
+      {makeStat(""), makeStat("c.d")},
+      {makeStat("a.b"), makeStat("")},
+      {makeStat(""), makeStat("")},
+      {makeStat("a.b"), makeStat("c.d"), makeStat("e.f")},
+      {makeStat(""), makeStat("c.d"), makeStat("")},
+      {makeStat(""), makeStat(""), makeStat("")},
+  };
+  for (const StatNameVec& names : cases) {
+    SymbolTable::StoragePtr joined = table_.join(names);
+    StatNameJoiner joiner(names, table_);
+    EXPECT_EQ(table_.toString(StatName(joined.get())), table_.toString(joiner.statName()));
+    EXPECT_EQ(StatName(joined.get()), joiner.statName());
+  }
+}
+
+// A join with at most one non-empty name references that name rather than copying it.
+TEST_F(StatNameTest, JoinerElidesNoOpJoin) {
+  StatName name = makeStat("a.b");
+  StatNameJoiner joiner({StatName(), name}, table_);
+  EXPECT_EQ(name.dataIncludingSize(), joiner.statName().dataIncludingSize());
+
+  StatNameJoiner joiner_both({name, makeStat("c.d")}, table_);
+  EXPECT_NE(name.dataIncludingSize(), joiner_both.statName().dataIncludingSize());
+  EXPECT_EQ("a.b.c.d", table_.toString(joiner_both.statName()));
+}
+
+// join() replaces any previously joined value, including dropping storage when the new join
+// is elided.
+TEST_F(StatNameTest, JoinerRejoin) {
+  StatNameJoiner joiner;
+  EXPECT_TRUE(joiner.statName().empty());
+
+  joiner.join({makeStat("a.b"), makeStat("c.d")}, table_);
+  EXPECT_EQ("a.b.c.d", table_.toString(joiner.statName()));
+
+  joiner.join({StatName(), makeStat("e.f")}, table_);
+  EXPECT_EQ("e.f", table_.toString(joiner.statName()));
+
+  joiner.join({makeStat("g.h"), makeStat("i.j")}, table_);
+  EXPECT_EQ("g.h.i.j", table_.toString(joiner.statName()));
+}
+
+// Moving a joiner transfers ownership of the joined bytes; the moved-to statName() stays valid
+// because the storage lives on the heap, not inside the joiner.
+TEST_F(StatNameTest, JoinerMove) {
+  StatNameJoiner joiner({makeStat("a.b"), makeStat("c.d")}, table_);
+  const uint8_t* joined_bytes = joiner.statName().dataIncludingSize();
+
+  StatNameJoiner moved(std::move(joiner));
+  EXPECT_EQ("a.b.c.d", table_.toString(moved.statName()));
+  EXPECT_EQ(joined_bytes, moved.statName().dataIncludingSize());
+
+  StatNameJoiner assigned;
+  assigned = std::move(moved);
+  EXPECT_EQ("a.b.c.d", table_.toString(assigned.statName()));
+  EXPECT_EQ(joined_bytes, assigned.statName().dataIncludingSize());
+}
+
+// An elided joiner references a caller name; moving it must carry that reference over.
+TEST_F(StatNameTest, JoinerMoveElided) {
+  StatName name = makeStat("a.b");
+  StatNameJoiner joiner({StatName(), name}, table_);
+  StatNameJoiner moved(std::move(joiner));
+  EXPECT_EQ(name.dataIncludingSize(), moved.statName().dataIncludingSize());
+  EXPECT_EQ("a.b", table_.toString(moved.statName()));
+}
+
+// TagStatNameJoiner is stored in containers by callers, so it must remain movable.
+TEST_F(StatNameTest, TagStatNameJoinerMovable) {
+  static_assert(std::is_move_constructible_v<TagUtility::TagStatNameJoiner>);
+  std::vector<TagUtility::TagStatNameJoiner> joiners;
+  joiners.emplace_back(makeStat("prefix"), makeStat("name"), std::nullopt, table_);
+  joiners.emplace_back(StatName(), makeStat("name"), std::nullopt, table_);
+  EXPECT_EQ("prefix.name", table_.toString(joiners[0].nameWithTags()));
+  EXPECT_EQ("name", table_.toString(joiners[1].nameWithTags()));
+}
+
 // Validates that we don't get tsan or other errors when concurrently creating
 // a large number of stats.
 TEST_F(StatNameTest, RacingSymbolCreation) {
@@ -699,6 +877,15 @@ TEST_F(StatNameTest, StorageCopy) {
   const StatName c = pool_.add(a);
   EXPECT_EQ(a, c);
   EXPECT_NE(a.data(), c.data());
+}
+
+TEST_F(StatNameTest, StorageFromEmptyStatName) {
+  StatName empty;
+  StatNameStorage b_storage(empty, table_);
+  const StatName b = b_storage.statName();
+  EXPECT_EQ(empty, b);
+  EXPECT_NE(empty.data(), b.data());
+  b_storage.free(table_);
 }
 
 TEST_F(StatNameTest, AddingToPoolViaStatNamePreservesDynamicSegments) {

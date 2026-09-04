@@ -1,18 +1,3 @@
-load("@bazel_gazelle//:deps.bzl", "go_repository")
-load("@build_bazel_apple_support//lib:repositories.bzl", "apple_support_dependencies")
-load("@build_bazel_rules_apple//apple:repositories.bzl", "apple_rules_dependencies")
-load("@build_bazel_rules_swift//swift:repositories.bzl", "swift_rules_dependencies")
-load("@robolectric//bazel:robolectric.bzl", "robolectric_repositories")
-load("@rules_detekt//detekt:dependencies.bzl", "rules_detekt_dependencies")
-load("@rules_java//java:repositories.bzl", "rules_java_dependencies")
-load("@rules_jvm_external//:defs.bzl", "maven_install")
-load("@rules_kotlin//kotlin:repositories.bzl", "kotlin_repositories")
-load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies")
-load("@rules_proto//proto:toolchains.bzl", "rules_proto_toolchains")
-load("@rules_proto_grpc//:repositories.bzl", "rules_proto_grpc_repos", "rules_proto_grpc_toolchains")
-load("@rules_python//python:pip.bzl", "pip_parse")
-load("@rules_shell//shell:repositories.bzl", "rules_shell_dependencies", "rules_shell_toolchains")
-
 def _default_extra_swift_sources_impl(ctx):
     ctx.file("WORKSPACE", "")
     ctx.file("empty.swift", "")
@@ -29,7 +14,7 @@ objc_library(
     visibility = ["//visibility:public"],
 )""")
 
-_default_extra_swift_sources = repository_rule(
+default_extra_swift_sources = repository_rule(
     implementation = _default_extra_swift_sources_impl,
 )
 
@@ -41,7 +26,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )""")
 
-_default_extra_jni_deps = repository_rule(
+default_extra_jni_deps = repository_rule(
     implementation = _default_extra_jni_deps_impl,
 )
 
@@ -89,8 +74,8 @@ def kotlin_dependencies(extra_maven_dependencies = []):
             "jakarta.inject:jakarta.inject-api:2.0.1",
             "junit:junit:4.13.2",
             "com.beust:jcommander:1.82",
-            "com.google.protobuf:protobuf-java:4.33.4",
-            "com.google.protobuf:protobuf-java-util:4.33.4",
+            "com.google.protobuf:protobuf-java:4.35.1",
+            "com.google.protobuf:protobuf-java-util:4.35.1",
             "com.google.code.findbugs:jsr305:3.0.2",
             "androidx.databinding:databinding-compiler:8.7.0",
             "org.ow2.asm:asm:9.6",
@@ -120,6 +105,7 @@ def kotlin_dependencies(extra_maven_dependencies = []):
         ],
         use_starlark_android_rules = True,
         aar_import_bzl_label = "@rules_android//rules:rules.bzl",
+        version_conflict_policy = "pinned",
     )
     maven_install(
         name = "android_ide_common_30_1_3",
@@ -136,8 +122,8 @@ def kotlin_dependencies(extra_maven_dependencies = []):
             "com.android.tools:sdk-common:30.1.3",
             "com.android.tools.build:builder:7.1.3",
             "com.android.tools.build:builder-model:7.1.3",
-            "com.google.protobuf:protobuf-java:4.33.4",
-            "com.google.protobuf:protobuf-java-util:4.33.4",
+            "com.google.protobuf:protobuf-java:4.35.1",
+            "com.google.protobuf:protobuf-java-util:4.35.1",
         ],
         repositories = [
             "https://maven.google.com",
@@ -151,8 +137,8 @@ def kotlin_dependencies(extra_maven_dependencies = []):
             "com.google.code.gson:gson:2.10.1",
             "com.google.errorprone:error_prone_annotations:2.23.0",
             "com.google.guava:guava:33.0.0-jre",
-            "com.google.protobuf:protobuf-java:4.33.4",
-            "com.google.protobuf:protobuf-java-util:4.33.4",
+            "com.google.protobuf:protobuf-java:4.35.1",
+            "com.google.protobuf:protobuf-java-util:4.35.1",
             "junit:junit:4.13.2",
             "org.mockito:mockito-core:5.4.0",
             "com.google.truth:truth:1.4.0",
@@ -168,7 +154,7 @@ def kotlin_dependencies(extra_maven_dependencies = []):
             "com.google.code.findbugs:jsr305:3.0.2",
             "androidx.annotation:annotation:1.5.0",
             # Java Proto Lite
-            "com.google.protobuf:protobuf-javalite:4.33.1",
+            "com.google.protobuf:protobuf-javalite:4.35.1",
             # Kotlin
             "org.jetbrains:annotations:23.0.0",
             "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.23",
@@ -216,24 +202,40 @@ def kotlin_dependencies(extra_maven_dependencies = []):
         importpath = "github.com/google/go-cmp",
         sum = "h1:O2Tfq5qg4qc4AmwVlvv0oLiVAGB7enBSJ2x2DqQFi38=",
         version = "v0.5.9",
+        repo_mapping = {
+            "@com_google_protobuf": "@protobuf",
+            "@io_bazel_rules_go": "@rules_go",
+        },
     )
     go_repository(
         name = "org_golang_x_sync",
         importpath = "golang.org/x/sync",
         sum = "h1:5KslGYwFpkhGh+Q16bwMP3cOontH8FOep7tGV86Y7SQ=",
         version = "v0.0.0-20210220032951-036812b2e83c",
+        repo_mapping = {
+            "@com_google_protobuf": "@protobuf",
+            "@io_bazel_rules_go": "@rules_go",
+        },
     )
     go_repository(
         name = "com_github_golang_glog",
         importpath = "github.com/golang/glog",
         version = "v1.1.2",
         sum = "h1:DVjP2PbBOzHyzA+dn3WhHIq4NdVu3Q+pvivFICf/7fo=",
+        repo_mapping = {
+            "@com_google_protobuf": "@protobuf",
+            "@io_bazel_rules_go": "@rules_go",
+        },
     )
     go_repository(
         name = "org_bitbucket_creachadair_stringset",
         importpath = "bitbucket.org/creachadair/stringset",
         version = "v0.0.14",
         sum = "h1:t1ejQyf8utS4GZV/4fM+1gvYucggZkfhb+tMobDxYOE=",
+        repo_mapping = {
+            "@com_google_protobuf": "@protobuf",
+            "@io_bazel_rules_go": "@rules_go",
+        },
     )
 
     rules_shell_dependencies()

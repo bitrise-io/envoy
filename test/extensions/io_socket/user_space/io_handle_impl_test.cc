@@ -7,12 +7,17 @@
 #include "source/extensions/io_socket/user_space/io_handle_impl.h"
 
 #include "test/mocks/event/mocks.h"
+#include "test/test_common/logging.h"
+#include "test/test_common/struct_matchers.h"
+#include "test/test_common/test_runtime.h"
 
 #include "absl/container/fixed_array.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
+using testing::Contains;
 using testing::NiceMock;
+using testing::Pair;
 
 namespace Envoy {
 namespace Extensions {
@@ -157,7 +162,7 @@ TEST_F(IoHandleImplTest, ReadEmpty) {
 // Read allows max_length value 0 and returns no error.
 TEST_F(IoHandleImplTest, ReadWhileProvidingNoCapacity) {
   Buffer::OwnedImpl buf;
-  absl::optional<uint64_t> max_length_opt{0};
+  std::optional<uint64_t> max_length_opt{0};
   auto result = io_handle_->read(buf, max_length_opt);
   EXPECT_TRUE(result.ok());
   EXPECT_EQ(0, result.return_value_);
@@ -210,7 +215,7 @@ TEST_F(IoHandleImplTest, ReadThrottling) {
   Buffer::OwnedImpl unlimited_buf;
   {
     // Read at most 8 * FRAGMENT_SIZE to unlimited buffer.
-    auto result0 = io_handle_->read(unlimited_buf, absl::nullopt);
+    auto result0 = io_handle_->read(unlimited_buf, std::nullopt);
     EXPECT_TRUE(result0.ok());
     EXPECT_EQ(result0.return_value_, 8 * FRAGMENT_SIZE);
     EXPECT_EQ(unlimited_buf.length(), 8 * FRAGMENT_SIZE);
@@ -424,7 +429,7 @@ TEST_F(IoHandleImplTest, WriteBufferFragement) {
   auto result = io_handle_->write(buf);
   EXPECT_FALSE(released);
   EXPECT_EQ(0, buf.length());
-  io_handle_peer_->read(buf, absl::nullopt);
+  io_handle_peer_->read(buf, std::nullopt);
   buf.drain(buf.length());
   EXPECT_TRUE(released);
 }
@@ -1156,7 +1161,7 @@ TEST_F(IoHandleImplTest, NotImplementAccept) {
 }
 
 TEST_F(IoHandleImplTest, LastRoundtripTimeNullOpt) {
-  ASSERT_EQ(absl::nullopt, io_handle_->lastRoundTripTime());
+  ASSERT_EQ(std::nullopt, io_handle_->lastRoundTripTime());
 }
 
 // IoHandleImpl can support EmulatedEdge trigger type but not level trigger type.
@@ -1200,8 +1205,9 @@ TEST_F(IoHandleImplTest, PassthroughState) {
   envoy::config::core::v3::Metadata dest_metadata;
   ASSERT_NE(nullptr, io_handle_peer_->passthroughState());
   io_handle_peer_->passthroughState()->mergeInto(dest_metadata, dest_filter_state);
-  ASSERT_EQ("val",
-            dest_metadata.filter_metadata().at("envoy.test").fields().at("key").string_value());
+  ASSERT_THAT(
+      dest_metadata.filter_metadata(),
+      Contains(Pair("envoy.test", HasStructFields(Contains(IsStructString("key", "val"))))));
   auto dest_object = dest_filter_state.getDataReadOnly<TestObject>("object_key");
   ASSERT_NE(nullptr, dest_object);
   ASSERT_EQ(object->value_, dest_object->value_);
@@ -1292,6 +1298,54 @@ TEST(IoHandleFactoryTest, UseExistingPassthroughState) {
     EXPECT_NE(std::dynamic_pointer_cast<TestPassthroughState>(io_handle_peer->passthroughState()),
               nullptr);
   }
+}
+
+TEST_F(IoHandleImplTest, ResetCloseEmitsConnectionResetErrorOnReadGuardEnabled) {
+  TestScopedRuntime scoped_runtime;
+  scoped_runtime.mergeValues(
+      {{"envoy.reloadable_features.enable_send_rst_on_user_space_socket", "true"}});
+
+  EXPECT_TRUE(io_handle_->isOpen());
+  EXPECT_TRUE(io_handle_peer_->isOpen());
+  io_handle_peer_->setAbortiveClose();
+  io_handle_peer_->close();
+  EXPECT_FALSE(io_handle_peer_->isOpen());
+  EXPECT_TRUE(io_handle_->isOpen());
+
+  Buffer::OwnedImpl read_buf;
+  auto read_res = io_handle_->read(read_buf, 1024);
+  EXPECT_FALSE(read_res.ok());
+  EXPECT_EQ(0, read_res.return_value_);
+  ASSERT_NE(nullptr, read_res.err_);
+  EXPECT_EQ(Network::IoSocketError::IoErrorCode::ConnectionReset, read_res.err_->getErrorCode());
+
+  Buffer::Slice mutable_slice(1024, nullptr);
+  auto slice = mutable_slice.reserve(1024);
+  Buffer::RawSlice raw_slice{slice.mem_, slice.len_};
+  auto readv_res = io_handle_->readv(1024, &raw_slice, 1);
+  EXPECT_FALSE(readv_res.ok());
+  EXPECT_EQ(0, readv_res.return_value_);
+  ASSERT_NE(nullptr, readv_res.err_);
+  EXPECT_EQ(Network::IoSocketError::IoErrorCode::ConnectionReset, readv_res.err_->getErrorCode());
+}
+
+TEST_F(IoHandleImplTest, ResetCloseEmitsEofOnReadGuardDisabled) {
+  TestScopedRuntime scoped_runtime;
+  scoped_runtime.mergeValues(
+      {{"envoy.reloadable_features.enable_send_rst_on_user_space_socket", "false"}});
+
+  EXPECT_TRUE(io_handle_->isOpen());
+  EXPECT_TRUE(io_handle_peer_->isOpen());
+  io_handle_peer_->setAbortiveClose();
+  io_handle_peer_->close();
+  EXPECT_FALSE(io_handle_peer_->isOpen());
+  EXPECT_TRUE(io_handle_->isOpen());
+
+  Buffer::OwnedImpl read_buf;
+  auto read_res = io_handle_->read(read_buf, 1024);
+  EXPECT_TRUE(read_res.ok());
+  EXPECT_EQ(0, read_res.return_value_);
+  EXPECT_EQ(nullptr, read_res.err_);
 }
 
 } // namespace

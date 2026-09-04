@@ -66,7 +66,9 @@ envoy_cc_library(
         "@envoy//source/common/common:scalar_to_byte_vector_lib",
         "@envoy//source/common/network:addr_family_aware_socket_option_lib",
         "@envoy//source/common/network:socket_option_lib",
+        "@envoy//source/common/runtime:runtime_features_lib",
         "@envoy//source/extensions/common/dynamic_forward_proxy:dns_cache_manager_impl",
+        "@envoy//source/server:generic_factory_context_lib",
     ],
 )
 

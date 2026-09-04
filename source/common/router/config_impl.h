@@ -5,6 +5,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <regex>
 #include <string>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "envoy/config/route/v3/route.pb.h"
 #include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/config/route/v3/route_components.pb.validate.h"
+#include "envoy/init/manager.h"
 #include "envoy/registry/registry.h"
 #include "envoy/router/cluster_specifier_plugin.h"
 #include "envoy/router/router.h"
@@ -44,7 +46,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
-#include "absl/types/optional.h"
 
 namespace Envoy {
 namespace Router {
@@ -90,7 +91,14 @@ public:
 
   absl::string_view sanitizedPath() const {
     if (!sanitized_path_computed_) {
-      sanitized_path_ = ignore_path_params_ ? stripPathParams(path()) : path();
+      sanitized_path_ = path();
+      if (ignore_path_params_) {
+        std::optional<std::string> modified_path = stripPathParams(path());
+        if (modified_path.has_value()) {
+          sanitized_path_storage_ = std::move(modified_path).value();
+          sanitized_path_ = sanitized_path_storage_;
+        }
+      }
       sanitized_path_computed_ = true;
     }
     return sanitized_path_;
@@ -98,8 +106,14 @@ public:
 
   absl::string_view sanitizedPathWithoutQuery() const {
     if (!sanitized_path_without_query_computed_) {
-      sanitized_path_without_query_ =
-          ignore_path_params_ ? stripPathParams(pathWithoutQuery()) : pathWithoutQuery();
+      sanitized_path_without_query_ = pathWithoutQuery();
+      if (ignore_path_params_) {
+        std::optional<std::string> modified_path = stripPathParams(pathWithoutQuery());
+        if (modified_path.has_value()) {
+          sanitized_path_without_query_storage_ = std::move(modified_path).value();
+          sanitized_path_without_query_ = sanitized_path_without_query_storage_;
+        }
+      }
       sanitized_path_without_query_computed_ = true;
     }
     return sanitized_path_without_query_;
@@ -129,13 +143,14 @@ public:
     return cookies_;
   }
 
-private:
-  static absl::string_view stripPathParams(absl::string_view path) {
-    const auto pos = path.find(';');
-    return pos != absl::string_view::npos ? path.substr(0, pos) : path;
-  }
+  // Strip parameters from URL path. Return modified path or nullopt if path was
+  // not modified.
+  static std::optional<std::string> stripPathParams(absl::string_view path);
 
+private:
   const Http::RequestHeaderMap& headers_;
+  mutable std::string sanitized_path_storage_;
+  mutable std::string sanitized_path_without_query_storage_;
   mutable absl::string_view path_without_query_;
   mutable absl::string_view sanitized_path_;
   mutable absl::string_view sanitized_path_without_query_;
@@ -191,7 +206,8 @@ public:
                                                   bool) const override {
     return {};
   }
-  std::string newUri(const Http::RequestHeaderMap& headers) const override;
+  std::string newUri(const Http::RequestHeaderMap& headers,
+                     const StreamInfo::StreamInfo& stream_info) const override;
   void rewritePathHeader(Http::RequestHeaderMap&, bool) const override {}
   Http::Code responseCode() const override { return Http::Code::MovedPermanently; }
   absl::string_view formatBody(const Http::RequestHeaderMap&, const Http::ResponseHeaderMap&,
@@ -217,7 +233,7 @@ public:
   const RouteSpecificFilterConfig* mostSpecificPerFilterConfig(absl::string_view) const override {
     return nullptr;
   }
-  absl::optional<bool> filterDisabled(absl::string_view) const override { return {}; }
+  std::optional<bool> filterDisabled(absl::string_view) const override { return {}; }
   RouteSpecificFilterConfigs perFilterConfigs(absl::string_view) const override { return {}; }
   const envoy::config::core::v3::Metadata& metadata() const override { return metadata_; }
   const Envoy::Config::TypedMetadata& typedMetadata() const override { return typed_metadata_; }
@@ -275,8 +291,8 @@ public:
   const std::string& allowHeaders() const override { return allow_headers_; };
   const std::string& exposeHeaders() const override { return expose_headers_; };
   const std::string& maxAge() const override { return max_age_; };
-  const absl::optional<bool>& allowCredentials() const override { return allow_credentials_; };
-  const absl::optional<bool>& allowPrivateNetworkAccess() const override {
+  const std::optional<bool>& allowCredentials() const override { return allow_credentials_; };
+  const std::optional<bool>& allowPrivateNetworkAccess() const override {
     return allow_private_network_access_;
   };
   bool enabled() const override {
@@ -293,7 +309,7 @@ public:
     }
     return false;
   };
-  const absl::optional<bool>& forwardNotMatchingPreflights() const override {
+  const std::optional<bool>& forwardNotMatchingPreflights() const override {
     return forward_not_matching_preflights_;
   }
 
@@ -306,9 +322,9 @@ private:
   const std::string allow_headers_;
   const std::string expose_headers_;
   const std::string max_age_;
-  absl::optional<bool> allow_credentials_;
-  absl::optional<bool> allow_private_network_access_;
-  absl::optional<bool> forward_not_matching_preflights_;
+  std::optional<bool> allow_credentials_;
+  std::optional<bool> allow_private_network_access_;
+  std::optional<bool> forward_not_matching_preflights_;
 };
 using CorsPolicyImpl = CorsPolicyImplBase<envoy::config::route::v3::CorsPolicy>;
 
@@ -329,7 +345,7 @@ public:
   create(const envoy::config::route::v3::VirtualHost& virtual_host,
          const CommonConfigSharedPtr& global_route_config,
          Server::Configuration::ServerFactoryContext& factory_context, Stats::Scope& scope,
-         ProtobufMessage::ValidationVisitor& validator);
+         ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager);
 
   const VirtualCluster* virtualClusterFromEntries(const Http::HeaderMap& headers) const;
   const CommonConfigImpl& globalRouteConfig() const { return *global_route_config_; }
@@ -345,7 +361,7 @@ public:
     }
     return HeaderParser::defaultParser();
   }
-  absl::optional<bool> filterDisabled(absl::string_view config_name) const;
+  std::optional<bool> filterDisabled(absl::string_view config_name) const;
 
   // Router::VirtualHost
   const CorsPolicy* corsPolicy() const override { return cors_policy_.get(); }
@@ -368,12 +384,10 @@ public:
     if (hedge_policy_ != nullptr) {
       return *hedge_policy_;
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
-  absl::optional<uint64_t> requestBodyBufferLimit() const { return request_body_buffer_limit_; }
-  absl::optional<uint32_t> legacyRequestBodyBufferLimit() const {
-    return per_request_buffer_limit_;
-  }
+  std::optional<uint64_t> requestBodyBufferLimit() const { return request_body_buffer_limit_; }
+  std::optional<uint32_t> legacyRequestBodyBufferLimit() const { return per_request_buffer_limit_; }
 
   RouteSpecificFilterConfigs perFilterConfigs(absl::string_view) const override;
   const envoy::config::core::v3::Metadata& metadata() const override;
@@ -387,7 +401,7 @@ private:
                         const CommonConfigSharedPtr& global_route_config,
                         Server::Configuration::ServerFactoryContext& factory_context,
                         Stats::Scope& scope, ProtobufMessage::ValidationVisitor& validator,
-                        absl::Status& creation_status);
+                        Init::Manager& init_manager, absl::Status& creation_status);
   struct StatNameProvider {
     StatNameProvider(absl::string_view name, Stats::SymbolTable& symbol_table)
         : stat_name_storage_(name, symbol_table) {}
@@ -396,7 +410,7 @@ private:
 
   struct VirtualClusterBase : public VirtualCluster {
   public:
-    VirtualClusterBase(const absl::optional<std::string>& name, Stats::StatName stat_name,
+    VirtualClusterBase(const std::optional<std::string>& name, Stats::StatName stat_name,
                        Stats::ScopeSharedPtr&& scope, const VirtualClusterStatNames& stat_names)
         : name_(name), stat_name_(stat_name), scope_(std::move(scope)),
           stats_(generateStats(*scope_, stat_names)) {}
@@ -404,12 +418,12 @@ private:
     // Router::VirtualCluster
     // name_ and stat_name_ are two different representations for the same string, retained in
     // memory to avoid symbol-table locks that would be needed when converting on-the-fly.
-    const absl::optional<std::string>& name() const override { return name_; }
+    const std::optional<std::string>& name() const override { return name_; }
     Stats::StatName statName() const override { return stat_name_; }
     VirtualClusterStats& stats() const override { return stats_; }
 
   private:
-    const absl::optional<std::string> name_;
+    const std::optional<std::string> name_;
     const Stats::StatName stat_name_;
     Stats::ScopeSharedPtr scope_;
     mutable VirtualClusterStats stats_;
@@ -424,7 +438,7 @@ private:
 
   struct CatchAllVirtualCluster : public VirtualClusterBase {
     CatchAllVirtualCluster(Stats::Scope& scope, const VirtualClusterStatNames& stat_names)
-        : VirtualClusterBase(absl::nullopt, stat_names.other_,
+        : VirtualClusterBase(std::nullopt, stat_names.other_,
                              scope.scopeFromStatName(stat_names.other_), stat_names) {}
   };
 
@@ -445,8 +459,8 @@ private:
   std::unique_ptr<envoy::config::route::v3::HedgePolicy> hedge_policy_;
   std::unique_ptr<const CatchAllVirtualCluster> virtual_cluster_catch_all_;
   RouteMetadataPackPtr metadata_;
-  const absl::optional<uint32_t> per_request_buffer_limit_;
-  const absl::optional<uint64_t> request_body_buffer_limit_;
+  const std::optional<uint32_t> per_request_buffer_limit_;
+  const std::optional<uint64_t> request_body_buffer_limit_;
   // Keep small members (bools and enums) at the end of class, to reduce alignment overhead.
   const bool include_attempt_count_in_request_ : 1;
   const bool include_attempt_count_in_response_ : 1;
@@ -461,8 +475,8 @@ public:
   VirtualHostImpl(const envoy::config::route::v3::VirtualHost& virtual_host,
                   const CommonConfigSharedPtr& global_route_config,
                   Server::Configuration::ServerFactoryContext& factory_context, Stats::Scope& scope,
-                  ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
-                  absl::Status& creation_status);
+                  ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+                  bool validate_clusters, absl::Status& creation_status);
 
   RouteConstSharedPtr getRouteFromEntries(const RouteCallback& cb,
                                           const Http::RequestHeaderMap& headers,
@@ -507,7 +521,7 @@ public:
   const Http::LowerCaseString& clusterHeader() const override { return cluster_header_; }
   const std::string& runtimeKey() const override { return runtime_key_; }
   const envoy::type::v3::FractionalPercent& defaultValue() const override { return default_value_; }
-  absl::optional<bool> traceSampled() const override { return trace_sampled_; }
+  std::optional<bool> traceSampled() const override { return trace_sampled_; }
   bool disableShadowHostSuffixAppend() const override {
     return disable_shadow_host_suffix_append_ || !host_rewrite_literal_.empty();
   }
@@ -523,7 +537,7 @@ private:
   const Http::LowerCaseString cluster_header_;
   std::string runtime_key_;
   envoy::type::v3::FractionalPercent default_value_;
-  absl::optional<bool> trace_sampled_;
+  std::optional<bool> trace_sampled_;
   const bool disable_shadow_host_suffix_append_;
   const std::string host_rewrite_literal_;
   HeaderMutationsPtr request_headers_mutations_;
@@ -668,7 +682,8 @@ protected:
   RouteEntryImplBase(const CommonVirtualHostSharedPtr& vhost,
                      const envoy::config::route::v3::Route& route,
                      Server::Configuration::ServerFactoryContext& factory_context,
-                     ProtobufMessage::ValidationVisitor& validator, absl::Status& creation_status);
+                     ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+                     absl::Status& creation_status);
 
 public:
   bool isDirectResponse() const { return direct_response_code_.has_value(); }
@@ -758,7 +773,7 @@ public:
 
   // `OptionalTimeouts` manages various `optional` values. We pack them in a
   // separate data structure for memory efficiency -- avoiding overhead of
-  // `absl::optional` per variable, and avoiding overhead of storing unset
+  // `std::optional` per variable, and avoiding overhead of storing unset
   // timeouts.
   enum class OptionalTimeoutNames {
     IdleTimeout = 0,
@@ -771,25 +786,25 @@ public:
   };
   using OptionalTimeouts = PackedStruct<std::chrono::milliseconds, 7, OptionalTimeoutNames>;
 
-  absl::optional<std::chrono::milliseconds> idleTimeout() const override {
+  std::optional<std::chrono::milliseconds> idleTimeout() const override {
     return getOptionalTimeout<OptionalTimeoutNames::IdleTimeout>();
   }
-  absl::optional<std::chrono::milliseconds> flushTimeout() const override {
+  std::optional<std::chrono::milliseconds> flushTimeout() const override {
     return getOptionalTimeout<OptionalTimeoutNames::FlushTimeout>();
   }
-  absl::optional<std::chrono::milliseconds> maxStreamDuration() const override {
+  std::optional<std::chrono::milliseconds> maxStreamDuration() const override {
     return getOptionalTimeout<OptionalTimeoutNames::MaxStreamDuration>();
   }
-  absl::optional<std::chrono::milliseconds> grpcTimeoutHeaderMax() const override {
+  std::optional<std::chrono::milliseconds> grpcTimeoutHeaderMax() const override {
     return getOptionalTimeout<OptionalTimeoutNames::GrpcTimeoutHeaderMax>();
   }
-  absl::optional<std::chrono::milliseconds> grpcTimeoutHeaderOffset() const override {
+  std::optional<std::chrono::milliseconds> grpcTimeoutHeaderOffset() const override {
     return getOptionalTimeout<OptionalTimeoutNames::GrpcTimeoutHeaderOffset>();
   }
-  absl::optional<std::chrono::milliseconds> maxGrpcTimeout() const override {
+  std::optional<std::chrono::milliseconds> maxGrpcTimeout() const override {
     return getOptionalTimeout<OptionalTimeoutNames::MaxGrpcTimeout>();
   }
-  absl::optional<std::chrono::milliseconds> grpcTimeoutOffset() const override {
+  std::optional<std::chrono::milliseconds> grpcTimeoutOffset() const override {
     return getOptionalTimeout<OptionalTimeoutNames::GrpcTimeoutOffset>();
   }
 
@@ -814,13 +829,14 @@ public:
     if (connect_config_ != nullptr) {
       return *connect_config_;
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
   const UpgradeMap& upgradeMap() const override { return upgrade_map_; }
   const EarlyDataPolicy& earlyDataPolicy() const override { return *early_data_policy_; }
 
   // Router::DirectResponseEntry
-  std::string newUri(const Http::RequestHeaderMap& headers) const override;
+  std::string newUri(const Http::RequestHeaderMap& headers,
+                     const StreamInfo::StreamInfo& stream_info) const override;
   void rewritePathHeader(Http::RequestHeaderMap&, bool) const override {}
   Http::Code responseCode() const override { return direct_response_code_.value(); }
   absl::string_view formatBody(const Http::RequestHeaderMap& request_headers,
@@ -834,7 +850,7 @@ public:
   const RouteEntry* routeEntry() const override;
   const Decorator* decorator() const override { return decorator_.get(); }
   const RouteTracing* tracingConfig() const override { return route_tracing_.get(); }
-  absl::optional<bool> filterDisabled(absl::string_view config_name) const override;
+  std::optional<bool> filterDisabled(absl::string_view config_name) const override;
   const RouteSpecificFilterConfig*
   mostSpecificPerFilterConfig(absl::string_view name) const override {
     auto* config = per_filter_configs_->get(name);
@@ -845,7 +861,7 @@ public:
 
   // Sanitizes the |path| before passing it to PathMatcher, if configured, this method makes the
   // path matching to ignore the path-parameters.
-  absl::string_view sanitizePathBeforePathMatching(const absl::string_view path) const;
+  std::string sanitizePathBeforePathMatching(const absl::string_view path) const;
 
 protected:
   const PathMatcherSharedPtr path_matcher_;
@@ -942,12 +958,12 @@ private:
 
   OptionalTimeouts buildOptionalTimeouts(const envoy::config::route::v3::RouteAction& route) const;
   template <OptionalTimeoutNames timeout_name>
-  absl::optional<std::chrono::milliseconds> getOptionalTimeout() const {
+  std::optional<std::chrono::milliseconds> getOptionalTimeout() const {
     const auto timeout = optional_timeouts_.get<timeout_name>();
     if (timeout.has_value()) {
       return *timeout;
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   absl::StatusOr<PathMatcherSharedPtr>
@@ -972,7 +988,7 @@ private:
   const OptionalTimeouts optional_timeouts_;
   Runtime::Loader& loader_;
   std::unique_ptr<const RuntimeData> runtime_;
-  std::unique_ptr<const ::Envoy::Http::Utility::RedirectConfig> redirect_config_;
+  std::unique_ptr<::Envoy::Http::Utility::RedirectConfig> redirect_config_;
   std::unique_ptr<const HedgePolicyImpl> hedge_policy_;
   RetryPolicyConstSharedPtr retry_policy_;
   std::unique_ptr<const InternalRedirectPolicyImpl> internal_redirect_policy_;
@@ -1006,7 +1022,7 @@ private:
   EarlyDataPolicyPtr early_data_policy_;
 
   const uint64_t request_body_buffer_limit_{std::numeric_limits<uint64_t>::max()};
-  const absl::optional<Http::Code> direct_response_code_;
+  const std::optional<Http::Code> direct_response_code_;
   // Keep small members (bools and enums) at the end of class, to reduce alignment overhead.
   const Http::Code cluster_not_found_response_code_;
   const Upstream::ResourcePriority priority_;
@@ -1047,7 +1063,7 @@ public:
                                    const envoy::config::route::v3::Route& route,
                                    Server::Configuration::ServerFactoryContext& factory_context,
                                    ProtobufMessage::ValidationVisitor& validator,
-                                   absl::Status& creation_status);
+                                   Init::Manager& init_manager, absl::Status& creation_status);
 
 private:
   const std::string uri_template_;
@@ -1081,7 +1097,7 @@ public:
   PrefixRouteEntryImpl(const CommonVirtualHostSharedPtr& vhost,
                        const envoy::config::route::v3::Route& route,
                        Server::Configuration::ServerFactoryContext& factory_context,
-                       ProtobufMessage::ValidationVisitor& validator,
+                       ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
                        absl::Status& creation_status);
 
 private:
@@ -1116,7 +1132,8 @@ public:
   PathRouteEntryImpl(const CommonVirtualHostSharedPtr& vhost,
                      const envoy::config::route::v3::Route& route,
                      Server::Configuration::ServerFactoryContext& factory_context,
-                     ProtobufMessage::ValidationVisitor& validator, absl::Status& creation_status);
+                     ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+                     absl::Status& creation_status);
 
 private:
   const Matchers::PathMatcherConstSharedPtr path_matcher_;
@@ -1150,7 +1167,8 @@ public:
   RegexRouteEntryImpl(const CommonVirtualHostSharedPtr& vhost,
                       const envoy::config::route::v3::Route& route,
                       Server::Configuration::ServerFactoryContext& factory_context,
-                      ProtobufMessage::ValidationVisitor& validator, absl::Status& creation_status);
+                      ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+                      absl::Status& creation_status);
 
 private:
   const Matchers::PathMatcherConstSharedPtr path_matcher_;
@@ -1185,7 +1203,7 @@ public:
   ConnectRouteEntryImpl(const CommonVirtualHostSharedPtr& vhost,
                         const envoy::config::route::v3::Route& route,
                         Server::Configuration::ServerFactoryContext& factory_context,
-                        ProtobufMessage::ValidationVisitor& validator,
+                        ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
                         absl::Status& creation_status);
 };
 
@@ -1218,7 +1236,7 @@ public:
                                     const envoy::config::route::v3::Route& route,
                                     Server::Configuration::ServerFactoryContext& factory_context,
                                     ProtobufMessage::ValidationVisitor& validator,
-                                    absl::Status& creation_status);
+                                    Init::Manager& init_manager, absl::Status& creation_status);
 
 private:
   const Matchers::PathMatcherConstSharedPtr path_matcher_;
@@ -1228,6 +1246,9 @@ private:
 struct RouteActionContext {
   const CommonVirtualHostSharedPtr& vhost;
   Server::Configuration::ServerFactoryContext& factory_context;
+  // Init manager that the routes created by the match tree should use to warm up their resources.
+  // This is only valid while the route configuration is being constructed and must never be stored.
+  Init::Manager& init_manager;
 };
 
 // Action used with the matching tree to specify route to use for an incoming stream.
@@ -1291,7 +1312,8 @@ public:
   create(const envoy::config::route::v3::RouteConfiguration& config,
          const CommonConfigSharedPtr& global_route_config,
          Server::Configuration::ServerFactoryContext& factory_context,
-         ProtobufMessage::ValidationVisitor& validator, bool validate_clusters);
+         ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+         bool validate_clusters);
 
   VirtualHostRoute route(const RouteCallback& cb, const Http::RequestHeaderMap& headers,
                          const StreamInfo::StreamInfo& stream_info, uint64_t random_value) const;
@@ -1302,8 +1324,8 @@ private:
   RouteMatcher(const envoy::config::route::v3::RouteConfiguration& config,
                const CommonConfigSharedPtr& global_route_config,
                Server::Configuration::ServerFactoryContext& factory_context,
-               ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
-               absl::Status& creation_status);
+               ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+               bool validate_clusters, absl::Status& creation_status);
 
   using WildcardVirtualHosts =
       std::map<int64_t, absl::flat_hash_map<std::string, VirtualHostImplSharedPtr>, std::greater<>>;
@@ -1340,7 +1362,7 @@ public:
   static absl::StatusOr<std::shared_ptr<CommonConfigImpl>>
   create(const envoy::config::route::v3::RouteConfiguration& config,
          Server::Configuration::ServerFactoryContext& factory_context,
-         ProtobufMessage::ValidationVisitor& validator);
+         ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager);
 
   const HeaderParser& requestHeaderParser() const {
     if (request_headers_parser_ != nullptr) {
@@ -1358,7 +1380,7 @@ public:
   const RouteSpecificFilterConfig* perFilterConfig(absl::string_view name) const {
     return per_filter_configs_->get(name);
   }
-  absl::optional<bool> filterDisabled(absl::string_view config_name) const {
+  std::optional<bool> filterDisabled(absl::string_view config_name) const {
     return per_filter_configs_->disabled(config_name);
   }
 
@@ -1377,7 +1399,7 @@ public:
   const std::vector<ShadowPolicyPtr>& shadowPolicies() const { return shadow_policies_; }
   absl::StatusOr<ClusterSpecifierPluginSharedPtr>
   clusterSpecifierPlugin(absl::string_view provider) const;
-  bool ignorePathParametersInPathMatching() const {
+  bool ignorePathParametersInPathMatching() const override {
     return ignore_path_parameters_in_path_matching_;
   }
   const envoy::config::core::v3::Metadata& metadata() const override;
@@ -1386,7 +1408,8 @@ public:
 private:
   CommonConfigImpl(const envoy::config::route::v3::RouteConfiguration& config,
                    Server::Configuration::ServerFactoryContext& factory_context,
-                   ProtobufMessage::ValidationVisitor& validator, absl::Status& creation_status);
+                   ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+                   absl::Status& creation_status);
   std::vector<Http::LowerCaseString> internal_only_headers_;
   HeaderParserPtr request_headers_parser_;
   HeaderParserPtr response_headers_parser_;
@@ -1409,10 +1432,17 @@ private:
  */
 class ConfigImpl : public Config {
 public:
+  /**
+   * @param init_manager the init manager that the resources owned by the new route
+   * configuration, such as the route level filter configurations, should use to warm up. The route
+   * configuration is only warmed up and published when the init manager is initialized. The init
+   * manager is only valid for the duration of this call and must never be stored.
+   */
   static absl::StatusOr<std::shared_ptr<ConfigImpl>>
   create(const envoy::config::route::v3::RouteConfiguration& config,
          Server::Configuration::ServerFactoryContext& factory_context,
-         ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default);
+         ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+         bool validate_clusters_default);
 
   bool virtualHostExists(const Http::RequestHeaderMap& headers) const {
     return route_matcher_->findVirtualHost(headers) != nullptr;
@@ -1441,7 +1471,7 @@ public:
   const std::vector<ShadowPolicyPtr>& shadowPolicies() const {
     return shared_config_->shadowPolicies();
   }
-  bool ignorePathParametersInPathMatching() const {
+  bool ignorePathParametersInPathMatching() const override {
     return shared_config_->ignorePathParametersInPathMatching();
   }
   const envoy::config::core::v3::Metadata& metadata() const override {
@@ -1454,8 +1484,8 @@ public:
 protected:
   ConfigImpl(const envoy::config::route::v3::RouteConfiguration& config,
              Server::Configuration::ServerFactoryContext& factory_context,
-             ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default,
-             absl::Status& creation_status);
+             ProtobufMessage::ValidationVisitor& validator, Init::Manager& init_manager,
+             bool validate_clusters_default, absl::Status& creation_status);
 
 private:
   CommonConfigSharedPtr shared_config_;
@@ -1488,6 +1518,7 @@ public:
   uint32_t maxDirectResponseBodySizeBytes() const override { return 0; }
   const envoy::config::core::v3::Metadata& metadata() const override;
   const Envoy::Config::TypedMetadata& typedMetadata() const override;
+  bool ignorePathParametersInPathMatching() const override { return false; }
 
 private:
   std::vector<Http::LowerCaseString> internal_only_headers_;

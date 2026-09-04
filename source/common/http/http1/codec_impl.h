@@ -91,11 +91,11 @@ public:
   const StreamInfo::BytesMeterSharedPtr& bytesMeter() override { return bytes_meter_; }
 
   // http1 doesn't have a codec level stream id.
-  absl::optional<uint32_t> codecStreamId() const override { return absl::nullopt; }
+  std::optional<uint32_t> codecStreamId() const override { return std::nullopt; }
 
 protected:
   StreamEncoderImpl(ConnectionImpl& connection, StreamInfo::BytesMeterSharedPtr&& bytes_meter);
-  void encodeHeadersBase(const RequestOrResponseHeaderMap& headers, absl::optional<uint64_t> status,
+  void encodeHeadersBase(const RequestOrResponseHeaderMap& headers, std::optional<uint64_t> status,
                          bool end_stream, bool bodiless_request);
   void encodeTrailersBase(const HeaderMap& headers);
 
@@ -257,6 +257,11 @@ public:
   CodecStats& stats() { return stats_; }
   bool enableTrailers() const { return codec_settings_.enable_trailers_; }
   virtual bool sendFullyQualifiedUrl() const { return codec_settings_.send_fully_qualified_url_; }
+#ifndef ENVOY_ENABLE_UHV
+  // Latched value of the `validate_upstream_headers` runtime feature, read once per connection
+  // instead of on every encoded request.
+  bool shouldValidateUpstreamHeaders() const { return validate_upstream_headers_; }
+#endif
   HeaderKeyFormatterOptConstRef formatter() const {
     return makeOptRefFromPtr(encode_only_header_key_formatter_.get());
   }
@@ -323,6 +328,9 @@ protected:
   StreamInfo::BytesMeterSharedPtr bytes_meter_before_stream_;
   const uint32_t max_headers_kb_;
   const uint32_t max_headers_count_;
+#ifndef ENVOY_ENABLE_UHV
+  const bool validate_upstream_headers_ = false;
+#endif
 
 private:
   enum class HeaderParsingState { Field, Value, Done };
@@ -579,7 +587,7 @@ class ClientConnectionImpl : public ClientConnection, public ConnectionImpl {
 public:
   ClientConnectionImpl(Network::Connection& connection, CodecStats& stats,
                        ConnectionCallbacks& callbacks, const Http1Settings& settings,
-                       absl::optional<uint16_t> max_response_headers_kb,
+                       std::optional<uint16_t> max_response_headers_kb,
                        const uint32_t max_response_headers_count,
                        bool passing_through_proxy = false);
   // Http::ClientConnection
@@ -658,7 +666,7 @@ private:
   // buffer. This buffer is always allocated, never nullptr.
   Buffer::InstancePtr owned_output_buffer_;
 
-  absl::optional<PendingResponse> pending_response_;
+  std::optional<PendingResponse> pending_response_;
   // TODO(mattklein123): The following bool tracks whether a pending response is complete before
   // dispatching callbacks. This is needed so that pending_response_ stays valid during callbacks
   // in order to access the stream, but to avoid invoking callbacks that shouldn't be called once

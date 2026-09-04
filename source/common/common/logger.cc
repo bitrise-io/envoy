@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "envoy/common/logger.h"
+
 #include "source/common/common/json_escape_string.h"
 #include "source/common/common/lock_guard.h"
 #include "source/common/version/version_string.h"
@@ -175,7 +177,7 @@ void Context::changeAllLogLevels(spdlog::level::level_enum level) {
   } else {
     // Level setting with Fine-Grain Logger.
     FINE_GRAIN_LOG(
-        info,
+        info, "",
         "change all log levels and default verbosity level for fine grain loggers: level='{}'",
         spdlog::level::level_string_views[level]);
     getFineGrainLogContext().updateVerbosityDefaultLevel(level);

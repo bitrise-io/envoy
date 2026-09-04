@@ -116,9 +116,7 @@ void XdsFuzzTest::close() {
  */
 bool XdsFuzzTest::eraseListener(const std::string& listener_name) {
   const auto orig_size = listeners_.size();
-  listeners_.erase(std::remove_if(listeners_.begin(), listeners_.end(),
-                                  [&](auto& listener) { return listener.name() == listener_name; }),
-                   listeners_.end());
+  std::erase_if(listeners_, [&](auto& listener) { return listener.name() == listener_name; });
   return orig_size != listeners_.size();
 }
 
@@ -388,26 +386,26 @@ void XdsFuzzTest::verifyState() {
 envoy::admin::v3::ListenersConfigDump XdsFuzzTest::getListenersConfigDump() {
   auto message_ptr = test_server_->server().admin()->getConfigTracker().getCallbacksMap().at(
       "listeners")(Matchers::UniversalStringMatcher());
-  return dynamic_cast<const envoy::admin::v3::ListenersConfigDump&>(*message_ptr);
+  return Envoy::Protobuf::DynamicCastMessage<envoy::admin::v3::ListenersConfigDump>(*message_ptr);
 }
 
 std::vector<envoy::config::route::v3::RouteConfiguration> XdsFuzzTest::getRoutesConfigDump() {
   auto map = test_server_->server().admin()->getConfigTracker().getCallbacksMap();
 
   // There is no route config dump before envoy has a route.
-  if (map.find("routes") == map.end()) {
+  if (!map.contains("routes")) {
     return {};
   }
 
   auto message_ptr = map.at("routes")(Matchers::UniversalStringMatcher());
-  auto dump = dynamic_cast<const envoy::admin::v3::RoutesConfigDump&>(*message_ptr);
+  auto dump = Envoy::Protobuf::DynamicCastMessage<envoy::admin::v3::RoutesConfigDump>(*message_ptr);
 
   // Since the route config dump gives the RouteConfigurations as an Any, go through and cast them
   // back to RouteConfigurations.
   std::vector<envoy::config::route::v3::RouteConfiguration> dump_routes;
   for (const auto& route : dump.dynamic_route_configs()) {
     envoy::config::route::v3::RouteConfiguration dyn_route;
-    route.route_config().UnpackTo(&dyn_route);
+    std::ignore = route.route_config().UnpackTo(&dyn_route);
     dump_routes.push_back(dyn_route);
   }
   return dump_routes;

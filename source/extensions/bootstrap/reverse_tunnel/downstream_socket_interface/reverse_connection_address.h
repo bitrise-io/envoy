@@ -1,10 +1,8 @@
 #pragma once
 
-#include <netinet/in.h>
-#include <sys/socket.h>
-
 #include <functional>
 
+#include "envoy/common/platform.h"
 #include "envoy/network/address.h"
 
 #include "source/common/common/logger.h"
@@ -86,7 +84,7 @@ public:
   const Network::Address::EnvoyInternalAddress* envoyInternalAddress() const override {
     return nullptr;
   }
-  absl::optional<std::string> networkNamespace() const override { return absl::nullopt; }
+  std::optional<std::string> networkNamespace() const override { return std::nullopt; }
   Network::Address::InstanceConstSharedPtr withNetworkNamespace(absl::string_view) const override {
     return nullptr;
   }

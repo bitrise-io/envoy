@@ -45,7 +45,10 @@ public:
   // TODO: figure out the correct fix: https://github.com/envoyproxy/envoy/issues/15072.
   static void shutdownAll();
 
-  void shutdown() { shutdown_ = true; }
+  void shutdown() {
+    shutdown_ = true;
+    xds_config_tracker_.reset();
+  }
 
   GrpcMuxWatchPtr addWatch(const std::string& type_url,
                            const absl::flat_hash_set<std::string>& resources,
@@ -64,7 +67,7 @@ public:
   ScopedResume pause(const std::vector<std::string> type_urls) override;
 
   void onDiscoveryResponse(
-      std::unique_ptr<envoy::service::discovery::v3::DeltaDiscoveryResponse>&& message,
+      ResponseProtoPtr<envoy::service::discovery::v3::DeltaDiscoveryResponse>&& message,
       ControlPlaneStats& control_plane_stats) override;
 
   void onStreamEstablished() override;
@@ -194,7 +197,7 @@ private:
   // First, prioritizes ACKs over non-ACK subscription interest updates.
   // Then, prioritizes non-ACK updates in the order the various types
   // of subscriptions were activated.
-  absl::optional<std::string> whoWantsToSendDiscoveryRequest();
+  std::optional<std::string> whoWantsToSendDiscoveryRequest();
 
   // Invoked when dynamic context parameters change for a resource type.
   void onDynamicContextUpdate(absl::string_view resource_type_url);

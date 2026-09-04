@@ -1,3 +1,6 @@
+// Changing the default behavior of ext_authz is generally not allowed. While you may add tests, you
+// generally should not change or remove existing tests.
+
 #include <string>
 
 #include "envoy/http/filter.h"
@@ -123,7 +126,7 @@ private:
   const bool expect_stats_;
   const bool expect_envoy_grpc_specific_stats_;
   const bool expect_response_bytes_;
-  const absl::optional<Protobuf::Struct> filter_metadata_;
+  const std::optional<Protobuf::Struct> filter_metadata_;
   // The gRPC status returned by the authorization server when it is making a gRPC call.
   const LoggingTestFilterConfig::GrpcStatus expect_grpc_status_;
 };

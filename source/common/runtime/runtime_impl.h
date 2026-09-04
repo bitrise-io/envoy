@@ -250,7 +250,7 @@ private:
   Random::RandomGenerator& generator_;
   RuntimeStats stats_;
   AdminLayerPtr admin_layer_;
-  ThreadLocal::SlotPtr tls_;
+  ThreadLocal::SlotSharedPtr tls_;
   const envoy::config::bootstrap::v3::LayeredRuntime config_;
   const std::string service_cluster_;
   Filesystem::WatcherPtr watcher_;
@@ -259,6 +259,7 @@ private:
   Init::WatcherImpl init_watcher_;
   Init::ManagerImpl init_manager_{"RTDS"};
   std::vector<RtdsSubscriptionPtr> subscriptions_;
+  absl::node_hash_map<std::string, bool> runtime_feature_defaults_;
   Upstream::ClusterManager* cm_{};
   Stats::Store& store_;
 

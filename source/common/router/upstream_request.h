@@ -97,6 +97,11 @@ public:
   void decodeHeaders(Http::ResponseHeaderMapPtr&& headers, bool end_stream) override;
   void decodeTrailers(Http::ResponseTrailerMapPtr&& trailers) override;
   void dumpState(std::ostream& os, int indent_level) const override;
+  // Reaches the downstream stream's WebTransport session via the router's downstream
+  // StreamDecoderFilterCallbacks. Note: in the usual filter-chain path the codec sees
+  // UpstreamCodecFilter::CodecBridge rather than this decoder; this override covers direct uses of
+  // UpstreamRequest as the decoder.
+  OptRef<Http::WebTransportSession> downstreamWebTransportSession() override;
 
   // UpstreamToDownstream (Http::StreamCallbacks)
   void onResetStream(Http::StreamResetReason reason,
@@ -120,7 +125,7 @@ public:
   void onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
                    Upstream::HostDescriptionConstSharedPtr host,
                    const Network::ConnectionInfoProvider& address_provider,
-                   StreamInfo::StreamInfo& info, absl::optional<Http::Protocol> protocol) override;
+                   StreamInfo::StreamInfo& info, std::optional<Http::Protocol> protocol) override;
   UpstreamToDownstream& upstreamToDownstream() override;
 
   void clearRequestEncoder();
@@ -198,7 +203,7 @@ private:
   Event::TimerPtr per_try_timeout_;
   Event::TimerPtr per_try_idle_timeout_;
   std::unique_ptr<GenericUpstream> upstream_;
-  absl::optional<Http::StreamResetReason> deferred_reset_reason_;
+  std::optional<Http::StreamResetReason> deferred_reset_reason_;
   Upstream::HostDescriptionConstSharedPtr upstream_host_;
   DownstreamWatermarkManager downstream_watermark_manager_{*this};
   Tracing::SpanPtr span_;
@@ -206,8 +211,8 @@ private:
   const MonotonicTime start_time_;
   // This is wrapped in an optional, since we want to avoid computing zero size headers when in
   // reality we just didn't get a response back.
-  absl::optional<uint64_t> response_headers_size_;
-  absl::optional<size_t> response_headers_count_;
+  std::optional<uint64_t> response_headers_size_;
+  std::optional<size_t> response_headers_count_;
   // Copies of upstream headers/trailers. These are only set if upstream
   // access logging is configured.
   Http::ResponseHeaderMapPtr upstream_headers_;
@@ -251,6 +256,9 @@ private:
   // waiting for response headers.
   bool paused_for_connect_ : 1 = false;
   bool paused_for_websocket_ : 1 = false;
+  // True if generic (non-WebSocket) upgrade headers have been sent but proxying payload is
+  // paused waiting for the upstream to accept the upgrade.
+  bool paused_for_generic_upgrade_ : 1 = false;
   bool reset_stream_ : 1 = false;
 
   // Sentinel to indicate if timeout budget tracking is configured for the cluster,
@@ -357,6 +365,7 @@ public:
 
   // Http::UpstreamStreamFilterCallbacks
   StreamInfo::StreamInfo& upstreamStreamInfo() override { return upstream_request_.streamInfo(); }
+  OptRef<Http::WebTransportSession> downstreamWebTransportSession() override;
   OptRef<GenericUpstream> upstream() override {
     return makeOptRefFromPtr(upstream_request_.upstream_.get());
   }
@@ -371,6 +380,13 @@ public:
   }
   void setPausedForWebsocketUpgrade(bool value) override {
     upstream_request_.paused_for_websocket_ = value;
+  }
+
+  bool pausedForGenericUpgrade() const override {
+    return upstream_request_.paused_for_generic_upgrade_;
+  }
+  void setPausedForGenericUpgrade(bool value) override {
+    upstream_request_.paused_for_generic_upgrade_ = value;
   }
 
   void disableRouteTimeoutForWebsocketUpgrade() override;

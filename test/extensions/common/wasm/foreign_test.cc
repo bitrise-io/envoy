@@ -46,8 +46,7 @@ TEST_F(ForeignTest, ForeignFunctionEdgeCaseTest) {
   testing::NiceMock<LocalInfo::MockLocalInfo> local_info;
 
   envoy::extensions::wasm::v3::PluginConfig plugin_config;
-  auto plugin = std::make_shared<Extensions::Common::Wasm::Plugin>(
-      plugin_config, envoy::config::core::v3::TrafficDirection::UNSPECIFIED, local_info, nullptr);
+  auto plugin = std::make_shared<Extensions::Common::Wasm::Plugin>(plugin_config, local_info);
   Wasm wasm(plugin->wasmConfig(), "", scope, *api, cluster_manager, *dispatcher);
   proxy_wasm::current_context_ = &ctx_;
 
@@ -74,8 +73,7 @@ TEST_F(ForeignTest, ForeignFunctionSetEnvoyFilterTest) {
   testing::NiceMock<LocalInfo::MockLocalInfo> local_info;
 
   envoy::extensions::wasm::v3::PluginConfig plugin_config;
-  auto plugin = std::make_shared<Extensions::Common::Wasm::Plugin>(
-      plugin_config, envoy::config::core::v3::TrafficDirection::UNSPECIFIED, local_info, nullptr);
+  auto plugin = std::make_shared<Extensions::Common::Wasm::Plugin>(plugin_config, local_info);
   Wasm wasm(plugin->wasmConfig(), "", scope, *api, cluster_manager, *dispatcher);
   proxy_wasm::current_context_ = &ctx_;
 
@@ -90,7 +88,7 @@ TEST_F(ForeignTest, ForeignFunctionSetEnvoyFilterTest) {
 
   args.set_path("invalid.path");
   args.set_value("unicorns");
-  args.SerializeToString(&in);
+  std::ignore = args.SerializeToString(&in);
   result = function(wasm, in, [](size_t size) { return malloc(size); });
   EXPECT_EQ(result, WasmResult::NotFound);
 
@@ -100,7 +98,7 @@ TEST_F(ForeignTest, ForeignFunctionSetEnvoyFilterTest) {
   args.set_path(TcpProxy::PerConnectionCluster::key());
   args.set_value("unicorns");
   args.set_span(envoy::source::extensions::common::wasm::LifeSpan::DownstreamRequest);
-  args.SerializeToString(&in);
+  std::ignore = args.SerializeToString(&in);
   result = function(wasm, in, [](size_t size) { return malloc(size); });
   EXPECT_EQ(result, WasmResult::Ok);
   EXPECT_TRUE(stream_info->filterState()->hasData<TcpProxy::PerConnectionCluster>(
@@ -109,7 +107,7 @@ TEST_F(ForeignTest, ForeignFunctionSetEnvoyFilterTest) {
   args.set_path(Upstream::OriginalDstClusterFilterStateKey);
   args.set_value("1.2.3.4:80");
   args.set_span(envoy::source::extensions::common::wasm::LifeSpan::DownstreamRequest);
-  args.SerializeToString(&in);
+  std::ignore = args.SerializeToString(&in);
   result = function(wasm, in, [](size_t size) { return malloc(size); });
   EXPECT_EQ(result, WasmResult::Ok);
   EXPECT_TRUE(stream_info->filterState()->hasData<Network::AddressObject>(

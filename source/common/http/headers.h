@@ -142,10 +142,14 @@ public:
 
   const LowerCaseString ProxyAuthenticate{"proxy-authenticate"};
   const LowerCaseString ProxyAuthorization{"proxy-authorization"};
+  // Registered by RFC 10008 Section 3. The value is a Structured Fields list of media ranges, not
+  // a plain comma-separated list, so it must be parsed as a Structured Field.
+  const LowerCaseString AcceptQuery{"accept-query"};
   const LowerCaseString CapsuleProtocol{"capsule-protocol"};
   const LowerCaseString ClientTraceId{"x-client-trace-id"};
   const LowerCaseString Connection{"connection"};
   const LowerCaseString ContentLength{"content-length"};
+  const LowerCaseString ContentLocation{"content-location"};
   const LowerCaseString ContentRange{"content-range"};
   const LowerCaseString ContentType{"content-type"};
   const LowerCaseString Cookie{"cookie"};
@@ -332,12 +336,16 @@ public:
     const std::string Patch{"PATCH"};
     const std::string Post{"POST"};
     const std::string Put{"PUT"};
+    // Registered by RFC 10008.
+    const std::string Query{"QUERY"};
     const std::string Trace{"TRACE"};
   } MethodValues;
 
   struct {
     // per https://tools.ietf.org/html/draft-kinnear-httpbis-http2-transport-02
     const std::string Bytestream{"bytestream"};
+    // per https://datatracker.ietf.org/doc/draft-ietf-webtrans-overview/
+    const std::string WebTransport{"webtransport"};
   } ProtocolValues;
 
   struct {

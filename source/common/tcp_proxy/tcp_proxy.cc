@@ -30,6 +30,7 @@
 #include "source/common/formatter/substitution_format_string.h"
 #include "source/common/http/request_id_extension_impl.h"
 #include "source/common/network/application_protocol.h"
+#include "source/common/network/drain_close_util.h"
 #include "source/common/network/proxy_protocol_filter_state.h"
 #include "source/common/network/socket_option_factory.h"
 #include "source/common/network/transport_socket_options_impl.h"
@@ -134,7 +135,11 @@ OnDemandStats OnDemandConfig::generateStats(Stats::Scope& scope) {
 Config::SharedConfig::SharedConfig(
     const envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy& config,
     Server::Configuration::FactoryContext& context)
-    : stats_scope_(context.scope().createScope(fmt::format("tcp.{}", config.stat_prefix()))),
+    : // tcp.(<stat_prefix>.)*
+      stats_scope_(context.scope().createScopeWithTaggedName(
+          "tcp",
+          {Stats::TagStringView{Envoy::Config::TagNames::get().TCP_PREFIX, config.stat_prefix()}},
+          fmt::format("tcp.{}", config.stat_prefix()))),
       stats_(generateStats(*stats_scope_)),
       flush_access_log_on_start_(config.access_log_options().flush_access_log_on_start()),
       proxy_protocol_tlv_merge_policy_(config.proxy_protocol_tlv_merge_policy()) {
@@ -220,10 +225,10 @@ Config::Config(const envoy::extensions::filters::network::tcp_proxy::v3::TcpProx
       upstream_drain_manager_slot_(context.serverFactoryContext().threadLocal().allocateSlot()),
       shared_config_(std::make_shared<SharedConfig>(config, context)),
       random_generator_(context.serverFactoryContext().api().randomGenerator()),
+      server_factory_context_(context.serverFactoryContext()),
       regex_engine_(context.serverFactoryContext().regexEngine()),
       drain_decision_(context.drainDecision()),
-      drain_close_scope_(context.listenerInfo().direction() ==
-                                 envoy::config::core::v3::TrafficDirection::INBOUND
+      drain_close_scope_(context.direction() == envoy::config::core::v3::TrafficDirection::INBOUND
                              ? Network::DrainDirection::InboundOnly
                              : Network::DrainDirection::All),
       check_drain_close_(PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, check_drain_close, false)) {
@@ -309,7 +314,7 @@ RouteConstSharedPtr Config::getRouteFromEntries(Network::Connection& connection)
                                           random_generator_.random(), false);
 }
 
-const absl::optional<std::chrono::milliseconds>
+const std::optional<std::chrono::milliseconds>
 Config::calculateMaxDownstreamConnectionDurationWithJitter() {
   const auto& max_downstream_connection_duration = maxDownstreamConnectionDuration();
   if (!max_downstream_connection_duration) {
@@ -341,6 +346,8 @@ UpstreamDrainManager& Config::drainManager() {
 Filter::Filter(ConfigSharedPtr config, Upstream::ClusterManager& cluster_manager)
     : tracing_config_(Tracing::EgressConfig::get()), config_(config),
       cluster_manager_(cluster_manager), downstream_callbacks_(*this),
+      use_connection_event_drain_(
+          Runtime::runtimeFeatureEnabled("envoy.reloadable_features.use_connection_event_drain")),
       upstream_callbacks_(new UpstreamCallbacks(this)),
       upstream_decoder_filter_callbacks_(HttpStreamDecoderFilterCallbacks(this)) {
   ASSERT(config != nullptr);
@@ -430,6 +437,9 @@ void Filter::initialize(Network::ReadFilterCallbacks& callbacks, bool set_connec
   read_callbacks_ = &callbacks;
   ENVOY_CONN_LOG(debug, "new tcp proxy session", read_callbacks_->connection());
 
+  // Captured once here rather than plumbed through the filter factory: the drain type belongs to
+  // the listener that accepted this connection, and is reachable from the connection itself.
+  drain_type_ = Network::listenerDrainType(read_callbacks_->connection());
   read_callbacks_->connection().addConnectionCallbacks(downstream_callbacks_);
   read_callbacks_->connection().enableHalfClose(true);
 
@@ -907,6 +917,15 @@ void Filter::onGenericPoolReady(StreamInfo::StreamInfo* info,
         initial_upstream_connection_start_time_.value(),
         read_callbacks_->connection().dispatcher().timeSource());
   }
+  // Plumb the upstream connection timing into the downstream stream info so the US_CX_BEG and
+  // US_CX_END COMMON_DURATION time points reflect the real connect timing.
+  if (info != nullptr && info->upstreamInfo() != nullptr) {
+    const auto& upstream_timing = info->upstreamInfo()->upstreamTiming();
+    upstream_info.upstreamTiming().upstream_connect_start_ =
+        upstream_timing.upstream_connect_start_;
+    upstream_info.upstreamTiming().upstream_connect_complete_ =
+        upstream_timing.upstream_connect_complete_;
+  }
   upstream_ = std::move(upstream);
   generic_conn_pool_.reset();
   read_callbacks_->upstreamHost(host);
@@ -1228,6 +1247,9 @@ void Filter::onDownstreamEvent(Network::ConnectionEvent event) {
   if (event == Network::ConnectionEvent::LocalClose ||
       event == Network::ConnectionEvent::RemoteClose) {
     downstream_closed_ = true;
+    // Record the downstream connection end time point for COMMON_DURATION access logging.
+    getStreamInfo().downstreamTiming().onDownstreamConnectionEnd(
+        read_callbacks_->connection().dispatcher().timeSource());
     // Cancel the potential odcds callback.
     cluster_discovery_handle_ = nullptr;
   }
@@ -1274,8 +1296,13 @@ void Filter::onUpstreamData(Buffer::Instance& data, bool end_stream) {
 
 void Filter::maybeCloseDownstreamForDrainClose() {
   if (!config_->checkDrainClose() || downstream_closed_ ||
-      read_callbacks_->connection().state() != Network::Connection::State::Open ||
-      !config_->drainDecision().drainClose(config_->drainCloseScope())) {
+      read_callbacks_->connection().state() != Network::Connection::State::Open) {
+    return;
+  }
+
+  // Note that the drain decision is only evaluated once it is known to be needed, since it
+  // consumes a random number on every call.
+  if (!shouldDrainClose()) {
     return;
   }
 
@@ -1283,6 +1310,15 @@ void Filter::maybeCloseDownstreamForDrainClose() {
   config_->stats().downstream_cx_drain_close_.inc();
   read_callbacks_->connection().close(Network::ConnectionCloseType::FlushWrite,
                                       StreamInfo::LocalCloseReasons::get().TcpProxyDrainClose);
+}
+
+bool Filter::shouldDrainClose() {
+  if (!use_connection_event_drain_) {
+    return config_->drainDecision().drainClose(config_->drainCloseScope());
+  }
+
+  return Network::shouldDrainClose(config_->serverFactoryContext(), drain_type_,
+                                   connection_drain_event_);
 }
 
 void Filter::onUpstreamEvent(Network::ConnectionEvent event) {
@@ -1543,7 +1579,7 @@ UpstreamDrainManager::~UpstreamDrainManager() {
 
       // cancelDrain() should cause that drainer to be removed from drainers_.
       // ASSERT so that we don't end up in an infinite loop.
-      ASSERT(drainers_.find(key) == drainers_.end());
+      ASSERT(!drainers_.contains(key));
     }
 
     // This destructor is run when shutting down `ThreadLocal`. The destructor of some objects use
@@ -1557,7 +1593,7 @@ void UpstreamDrainManager::add(const Config::SharedConfigSharedPtr& config,
                                Tcp::ConnectionPool::ConnectionDataPtr&& upstream_conn_data,
                                const std::shared_ptr<Filter::UpstreamCallbacks>& callbacks,
                                Event::TimerPtr&& idle_timer,
-                               absl::optional<std::chrono::milliseconds> idle_timeout,
+                               std::optional<std::chrono::milliseconds> idle_timeout,
                                const Upstream::HostDescriptionConstSharedPtr& upstream_host) {
   DrainerPtr drainer(new Drainer(*this, config, callbacks, std::move(upstream_conn_data),
                                  std::move(idle_timer), idle_timeout, upstream_host));
@@ -1578,7 +1614,7 @@ void UpstreamDrainManager::remove(Drainer& drainer, Event::Dispatcher& dispatche
 Drainer::Drainer(UpstreamDrainManager& parent, const Config::SharedConfigSharedPtr& config,
                  const std::shared_ptr<Filter::UpstreamCallbacks>& callbacks,
                  Tcp::ConnectionPool::ConnectionDataPtr&& conn_data, Event::TimerPtr&& idle_timer,
-                 absl::optional<std::chrono::milliseconds> idle_timeout,
+                 std::optional<std::chrono::milliseconds> idle_timeout,
                  const Upstream::HostDescriptionConstSharedPtr& upstream_host)
     : parent_(parent), callbacks_(callbacks), upstream_conn_data_(std::move(conn_data)),
       idle_timer_(std::move(idle_timer)), idle_timeout_(idle_timeout),

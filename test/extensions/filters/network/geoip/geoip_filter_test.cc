@@ -6,11 +6,13 @@
 #include "source/common/stream_info/filter_state_impl.h"
 #include "source/extensions/filters/network/geoip/geoip_filter.h"
 
-#include "test/extensions/filters/http/geoip/mocks.h"
+#include "test/mocks/geoip/mocks.h"
 #include "test/mocks/network/mocks.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/test_common/logging.h"
 #include "test/test_common/registry.h"
+#include "test/test_common/status_utility.h"
+#include "test/test_common/struct_matchers.h"
 #include "test/test_common/utility.h"
 
 #include "gmock/gmock.h"
@@ -18,11 +20,7 @@
 
 using testing::_;
 using testing::Invoke;
-
-// Import the shared geoip mocks from the HTTP filter tests.
-using Envoy::Extensions::HttpFilters::Geoip::DummyGeoipProviderFactory;
-using Envoy::Extensions::HttpFilters::Geoip::MockDriver;
-using Envoy::Extensions::HttpFilters::Geoip::MockDriverSharedPtr;
+using testing::UnorderedElementsAre;
 
 namespace Envoy {
 namespace Extensions {
@@ -35,7 +33,7 @@ const std::string BasicGeoipConfig = R"EOF(
     provider:
         name: "envoy.geoip_providers.dummy"
         typed_config:
-          "@type": type.googleapis.com/test.extensions.filters.http.geoip.DummyProvider
+          "@type": type.googleapis.com/test.mocks.geoip.DummyProvider
 )EOF";
 
 // Matcher to verify LookupRequest has the expected remote address.
@@ -74,7 +72,8 @@ MATCHER_P2(HasGeoField, key, value_matcher, "") {
 class GeoipFilterTest : public testing::Test {
 public:
   GeoipFilterTest()
-      : dummy_factory_(new DummyGeoipProviderFactory()), dummy_driver_(dummy_factory_->getDriver()),
+      : dummy_factory_(new Geolocation::DummyGeoipProviderFactory()),
+        dummy_driver_(dummy_factory_->getDriver()),
         filter_state_(std::make_shared<StreamInfo::FilterStateImpl>(
             StreamInfo::FilterState::LifeSpan::Connection)) {
     ON_CALL(filter_callbacks_.connection_.stream_info_, filterState())
@@ -95,7 +94,7 @@ public:
   // Create a simple formatter that returns a static string.
   Formatter::FormatterConstSharedPtr createFormatterFromString(const std::string& format_str) {
     auto formatter_or_error = Formatter::FormatterImpl::create(format_str, false);
-    EXPECT_TRUE(formatter_or_error.ok());
+    EXPECT_OK(formatter_or_error);
     return std::move(formatter_or_error.value());
   }
 
@@ -115,8 +114,8 @@ public:
   NiceMock<Stats::MockStore> stats_;
   GeoipFilterConfigSharedPtr config_;
   std::shared_ptr<GeoipFilter> filter_;
-  std::unique_ptr<DummyGeoipProviderFactory> dummy_factory_;
-  MockDriverSharedPtr dummy_driver_;
+  std::unique_ptr<Geolocation::DummyGeoipProviderFactory> dummy_factory_;
+  Geolocation::MockDriverSharedPtr dummy_driver_;
   NiceMock<Network::MockReadFilterCallbacks> filter_callbacks_;
   StreamInfo::FilterStateSharedPtr filter_state_;
 };
@@ -228,8 +227,8 @@ TEST_F(GeoipFilterTest, GeoipInfoSerialization) {
   auto proto = info.serializeAsProto();
   ASSERT_NE(nullptr, proto);
   const auto& proto_struct = dynamic_cast<const Protobuf::Struct&>(*proto);
-  EXPECT_EQ("Seattle", proto_struct.fields().at("x-geo-city").string_value());
-  EXPECT_EQ("US", proto_struct.fields().at("x-geo-country").string_value());
+  EXPECT_THAT(proto_struct.fields(), UnorderedElementsAre(IsStructString("x-geo-city", "Seattle"),
+                                                          IsStructString("x-geo-country", "US")));
 
   // Test serializeAsString.
   auto json_string = info.serializeAsString();

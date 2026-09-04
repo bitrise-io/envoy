@@ -24,7 +24,7 @@ envoy_cc_test_library(
 envoy_cc_test(
     name = "admin_test",
     srcs = envoy_select_admin_functionality(["admin_test.cc"]),
-    rbe_pool = "6gig",
+    rbe_pool = "linux_x64_small",
     deps = [
         "//source/extensions/common/tap:admin",
         "//source/extensions/common/tap:tap_config_base",
@@ -40,11 +40,14 @@ envoy_cc_test(
 envoy_cc_test(
     name = "tap_config_base_test",
     srcs = ["tap_config_base_test.cc"],
-    rbe_pool = "6gig",
+    rbe_pool = "linux_x64_small",
     deps = [
         "//source/common/buffer:buffer_lib",
         "//source/extensions/common/tap:tap_config_base",
+        "//test/mocks/server:server_factory_context_mocks",
+        "//test/test_common:test_runtime_lib",
         "@envoy_api//envoy/config/tap/v3:pkg_cc_proto",
         "@envoy_api//envoy/data/tap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
     ],
 )

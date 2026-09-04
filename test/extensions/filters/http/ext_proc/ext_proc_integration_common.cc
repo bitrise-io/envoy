@@ -1,3 +1,6 @@
+// Changing the default behavior of ext_proc is generally not allowed. While you may add tests, you
+// generally should not change or remove existing tests.
+
 #include "test/extensions/filters/http/ext_proc/ext_proc_integration_common.h"
 
 #include <chrono>
@@ -14,7 +17,15 @@
 #include "source/common/protobuf/protobuf.h"
 #include "source/common/protobuf/utility.h"
 
+#include "test/test_common/struct_matchers.h"
+
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+
+using testing::Contains;
+using testing::Ge;
+using testing::Key;
+using testing::UnorderedElementsAre;
 
 namespace Envoy {
 namespace Extensions {
@@ -57,7 +68,7 @@ void ExtProcIntegrationTest::addDownstreamExtProcFilter(
   setGrpcService(*proto_config.mutable_grpc_service(), cluster_name, grpc_upstream->localAddress());
   envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter ext_proc_filter;
   ext_proc_filter.set_name(ext_proc_filter_name);
-  ext_proc_filter.mutable_typed_config()->PackFrom(proto_config);
+  std::ignore = ext_proc_filter.mutable_typed_config()->PackFrom(proto_config);
   config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrError(ext_proc_filter));
 }
 
@@ -116,7 +127,7 @@ void ExtProcIntegrationTest::initializeConfig(
         envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter
             ext_proc_filter;
         ext_proc_filter.set_name(ext_proc_filter_name);
-        ext_proc_filter.mutable_typed_config()->PackFrom(proto_config_);
+        std::ignore = ext_proc_filter.mutable_typed_config()->PackFrom(proto_config_);
         config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrError(ext_proc_filter));
       } break;
       case ConfigOptions::FilterSetup::kCompositeMatchOnRequestHeaders: {
@@ -151,9 +162,9 @@ void ExtProcIntegrationTest::initializeConfig(
       typed_md->set_allow_overwrite(true);
       envoy::extensions::filters::http::set_metadata::v3::Metadata typed_md_to_stuff;
       typed_md_to_stuff.set_metadata_namespace("typed_value from set_metadata");
-      typed_md->mutable_typed_value()->PackFrom(typed_md_to_stuff);
+      std::ignore = typed_md->mutable_typed_value()->PackFrom(typed_md_to_stuff);
 
-      set_metadata_filter.mutable_typed_config()->PackFrom(set_metadata_config);
+      std::ignore = set_metadata_filter.mutable_typed_config()->PackFrom(set_metadata_config);
       config_helper_.prependFilter(
           MessageUtil::getJsonStringFromMessageOrError(set_metadata_filter));
 
@@ -198,7 +209,7 @@ void ExtProcIntegrationTest::initializeConfig(
 
       envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter logging_filter;
       logging_filter.set_name("logging-test-filter");
-      logging_filter.mutable_typed_config()->PackFrom(logging_filter_config);
+      std::ignore = logging_filter.mutable_typed_config()->PackFrom(logging_filter_config);
 
       config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrError(logging_filter));
     }
@@ -214,7 +225,8 @@ void ExtProcIntegrationTest::initializeConfig(
             *processing_response_factory_);
     Protobuf::Struct config;
     proto_config_.mutable_on_processing_response()->set_name("test-on-processing-response");
-    proto_config_.mutable_on_processing_response()->mutable_typed_config()->PackFrom(config);
+    std::ignore =
+        proto_config_.mutable_on_processing_response()->mutable_typed_config()->PackFrom(config);
   }
 
   if (config_option.http1_codec) {
@@ -277,7 +289,7 @@ void ExtProcIntegrationTest::protocolConfigEncoding(ProcessingRequest& request) 
 }
 
 IntegrationStreamDecoderPtr ExtProcIntegrationTest::sendDownstreamRequest(
-    absl::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers) {
+    std::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers) {
   auto conn = makeClientConnection(lookupPort("http"));
   codec_client_ = makeHttpConnection(std::move(conn));
   Http::TestRequestHeaderMapImpl headers;
@@ -290,7 +302,7 @@ IntegrationStreamDecoderPtr ExtProcIntegrationTest::sendDownstreamRequest(
 
 IntegrationStreamDecoderPtr ExtProcIntegrationTest::sendDownstreamRequestWithBody(
     absl::string_view body,
-    absl::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers,
+    std::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers,
     bool add_content_length) {
   auto conn = makeClientConnection(lookupPort("http"));
   codec_client_ = makeHttpConnection(std::move(conn));
@@ -388,7 +400,7 @@ void ExtProcIntegrationTest::waitForFirstMessage(FakeUpstream& grpc_upstream,
 
 void ExtProcIntegrationTest::processGenericMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const ProcessingRequest&, ProcessingResponse&)>> cb) {
+    std::optional<std::function<bool(const ProcessingRequest&, ProcessingResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -407,7 +419,7 @@ void ExtProcIntegrationTest::processGenericMessage(
 
 void ExtProcIntegrationTest::processRequestHeadersMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb) {
+    std::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -429,7 +441,7 @@ void ExtProcIntegrationTest::processRequestHeadersMessage(
 
 void ExtProcIntegrationTest::processRequestTrailersMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb) {
+    std::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -450,7 +462,7 @@ void ExtProcIntegrationTest::processRequestTrailersMessage(
 
 void ExtProcIntegrationTest::processResponseHeadersMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb) {
+    std::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -473,7 +485,7 @@ void ExtProcIntegrationTest::processResponseHeadersMessage(
 
 void ExtProcIntegrationTest::processRequestBodyMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb,
+    std::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb,
     bool check_downstream_flow_control) {
   ProcessingRequest request;
   if (first_message) {
@@ -492,7 +504,7 @@ void ExtProcIntegrationTest::processRequestBodyMessage(
     // Check the flow control counter in downstream, which is triggered on the request
     // path to ext_proc server (i.e., from side stream).
     test_server_->waitForCounter("http.config_test.downstream_flow_control_paused_reading_total",
-                                 testing::Ge(1));
+                                 Ge(1));
   }
 
   // Send back the response from ext_proc server.
@@ -506,7 +518,7 @@ void ExtProcIntegrationTest::processRequestBodyMessage(
 
 void ExtProcIntegrationTest::processResponseBodyMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb) {
+    std::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -529,7 +541,7 @@ void ExtProcIntegrationTest::processResponseBodyMessage(
 
 void ExtProcIntegrationTest::processResponseTrailersMessage(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb) {
+    std::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -550,7 +562,7 @@ void ExtProcIntegrationTest::processResponseTrailersMessage(
 
 void ExtProcIntegrationTest::processAndRespondImmediately(
     FakeUpstream& grpc_upstream, bool first_message,
-    absl::optional<std::function<void(ImmediateResponse&)>> cb) {
+    std::optional<std::function<void(ImmediateResponse&)>> cb) {
   ProcessingRequest request;
   if (first_message) {
     ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
@@ -566,6 +578,34 @@ void ExtProcIntegrationTest::processAndRespondImmediately(
     (*cb)(*immediate);
   }
   processor_stream_->sendGrpcMessage(response);
+}
+
+void ExtProcIntegrationTest::packTwoResponsesInOneMessage(
+    FakeUpstream& grpc_upstream, bool immediate_response,
+    std::optional<std::function<void(ImmediateResponse&)>> cb) {
+  ProcessingRequest request;
+  ASSERT_TRUE(grpc_upstream.waitForHttpConnection(*dispatcher_, processor_connection_));
+  ASSERT_TRUE(processor_connection_->waitForNewStream(*dispatcher_, processor_stream_));
+  ASSERT_TRUE(processor_stream_->waitForGrpcMessage(*dispatcher_, request));
+  processor_stream_->startGrpcStream();
+
+  ProcessingResponse response1;
+  if (immediate_response) {
+    auto* immediate = response1.mutable_immediate_response();
+    if (cb) {
+      (*cb)(*immediate);
+    }
+  } else {
+    response1.mutable_request_trailers();
+  }
+  auto serialized_response1 = Grpc::Common::serializeToGrpcFrame(response1);
+  Buffer::OwnedImpl combined_buffer;
+  combined_buffer.add(*serialized_response1);
+  ProcessingResponse response2;
+  response2.mutable_response_trailers();
+  auto serialized_response2 = Grpc::Common::serializeToGrpcFrame(response2);
+  combined_buffer.add(*serialized_response2);
+  processor_stream_->encodeData(combined_buffer, false);
 }
 
 // ext_proc server sends back a response to tell Envoy to stop the
@@ -593,7 +633,7 @@ void ExtProcIntegrationTest::newTimeoutWrongConfigTest(const uint64_t timeout_ms
   }
   initializeConfig();
   HttpIntegrationTest::initialize();
-  auto response = sendDownstreamRequest(absl::nullopt);
+  auto response = sendDownstreamRequest(std::nullopt);
 
   processRequestHeadersMessage(*grpc_upstreams_[0], true,
                                [&](const HttpHeaders&, HeadersResponse&) {
@@ -623,7 +663,7 @@ void ExtProcIntegrationTest::testWithHeaderMutation(ConfigOptions config_option)
   initializeConfig(config_option);
   HttpIntegrationTest::initialize();
 
-  auto response = sendDownstreamRequestWithBody("Replace this!", absl::nullopt);
+  auto response = sendDownstreamRequestWithBody("Replace this!", std::nullopt);
   processRequestHeadersMessage(
       *grpc_upstreams_[0], true, [](const HttpHeaders&, HeadersResponse& headers_resp) {
         auto* content_length =
@@ -656,9 +696,8 @@ void ExtProcIntegrationTest::testWithoutHeaderMutation(ConfigOptions config_opti
   initializeConfig(config_option);
   HttpIntegrationTest::initialize();
 
-  auto response =
-      sendDownstreamRequestWithBody("test!", absl::nullopt, /*add_content_length=*/true);
-  processRequestHeadersMessage(*grpc_upstreams_[0], true, absl::nullopt);
+  auto response = sendDownstreamRequestWithBody("test!", std::nullopt, /*add_content_length=*/true);
+  processRequestHeadersMessage(*grpc_upstreams_[0], true, std::nullopt);
   processRequestBodyMessage(
       *grpc_upstreams_[0], false, [](const HttpBody& body, BodyResponse& body_resp) {
         EXPECT_TRUE(body.end_of_stream());
@@ -683,7 +722,7 @@ void ExtProcIntegrationTest::addMutationRemoveHeaders(
 
 void ExtProcIntegrationTest::testGetAndFailStream() {
   HttpIntegrationTest::initialize();
-  auto response = sendDownstreamRequest(absl::nullopt);
+  auto response = sendDownstreamRequest(std::nullopt);
 
   ProcessingRequest request_headers_msg;
   waitForFirstMessage(*grpc_upstreams_[0], request_headers_msg);
@@ -694,7 +733,7 @@ void ExtProcIntegrationTest::testGetAndFailStream() {
 
 void ExtProcIntegrationTest::testGetAndCloseStream() {
   HttpIntegrationTest::initialize();
-  auto response = sendDownstreamRequest(absl::nullopt);
+  auto response = sendDownstreamRequest(std::nullopt);
 
   ProcessingRequest request_headers_msg;
   waitForFirstMessage(*grpc_upstreams_[0], request_headers_msg);
@@ -706,7 +745,7 @@ void ExtProcIntegrationTest::testGetAndCloseStream() {
   verifyDownstreamResponse(*response, 200);
 }
 
-void ExtProcIntegrationTest::testSendDyanmicMetadata() {
+void ExtProcIntegrationTest::testSendDynamicMetadata() {
   Protobuf::Struct test_md_struct;
   (*test_md_struct.mutable_fields())["foo"].set_string_value("value from ext_proc");
 
@@ -716,21 +755,22 @@ void ExtProcIntegrationTest::testSendDyanmicMetadata() {
   processGenericMessage(
       *grpc_upstreams_[0], true, [md_val](const ProcessingRequest& req, ProcessingResponse& resp) {
         // Verify the processing request contains the untyped metadata we injected.
-        EXPECT_TRUE(req.metadata_context().filter_metadata().contains("forwarding_ns_untyped"));
+        EXPECT_THAT(req.metadata_context().filter_metadata(),
+                    Contains(Key("forwarding_ns_untyped")));
         const Protobuf::Struct& fwd_metadata =
             req.metadata_context().filter_metadata().at("forwarding_ns_untyped");
-        EXPECT_EQ(1, fwd_metadata.fields_size());
-        EXPECT_TRUE(fwd_metadata.fields().contains("foo"));
-        EXPECT_EQ("value from set_metadata", fwd_metadata.fields().at("foo").string_value());
+        EXPECT_THAT(fwd_metadata.fields(),
+                    UnorderedElementsAre(IsStructString("foo", "value from set_metadata")));
 
         // Verify the processing request contains the typed metadata we injected.
-        EXPECT_TRUE(req.metadata_context().typed_filter_metadata().contains("forwarding_ns_typed"));
+        EXPECT_THAT(req.metadata_context().typed_filter_metadata(),
+                    Contains(Key("forwarding_ns_typed")));
         const Protobuf::Any& fwd_typed_metadata =
             req.metadata_context().typed_filter_metadata().at("forwarding_ns_typed");
         EXPECT_EQ("type.googleapis.com/envoy.extensions.filters.http.set_metadata.v3.Metadata",
                   fwd_typed_metadata.type_url());
         envoy::extensions::filters::http::set_metadata::v3::Metadata typed_md_from_req;
-        fwd_typed_metadata.UnpackTo(&typed_md_from_req);
+        std::ignore = fwd_typed_metadata.UnpackTo(&typed_md_from_req);
         EXPECT_EQ("typed_value from set_metadata", typed_md_from_req.metadata_namespace());
 
         // Spoof the response to contain receiving metadata.
@@ -741,6 +781,25 @@ void ExtProcIntegrationTest::testSendDyanmicMetadata() {
 
         return true;
       });
+}
+
+void ExtProcIntegrationTest::testSendTypedDynamicMetadata() {
+  envoy::extensions::filters::http::set_metadata::v3::Metadata typed_md_to_stuff;
+  typed_md_to_stuff.set_metadata_namespace("typed_value from ext_proc");
+
+  Protobuf::Any typed_val;
+  EXPECT_TRUE(typed_val.PackFrom(typed_md_to_stuff));
+
+  processGenericMessage(*grpc_upstreams_[0], true,
+                        [typed_val](const ProcessingRequest&, ProcessingResponse& resp) {
+                          // Spoof the response to contain receiving typed metadata.
+                          HeadersResponse headers_resp;
+                          (*resp.mutable_request_headers()) = headers_resp;
+                          auto mut_typed_md = resp.mutable_typed_dynamic_metadata();
+                          (*mut_typed_md)["receiving_ns_typed"] = typed_val;
+
+                          return true;
+                        });
 }
 
 void ExtProcIntegrationTest::testSidestreamPushbackDownstream(uint32_t body_size,
@@ -754,7 +813,7 @@ void ExtProcIntegrationTest::testSidestreamPushbackDownstream(uint32_t body_size
   HttpIntegrationTest::initialize();
 
   std::string body_str = std::string(body_size, 'a');
-  auto response = sendDownstreamRequestWithBody(body_str, absl::nullopt);
+  auto response = sendDownstreamRequestWithBody(body_str, std::nullopt);
 
   bool end_stream = false;
   int count = 0;
@@ -979,23 +1038,23 @@ void ExtProcIntegrationTest::prependExtProcCompositeFilter(const Protobuf::Messa
   auto* extension_config = extension_with_matcher.mutable_extension_config();
   extension_config->set_name("composite");
   envoy::extensions::filters::http::composite::v3::Composite composite_config;
-  extension_config->mutable_typed_config()->PackFrom(composite_config);
+  std::ignore = extension_config->mutable_typed_config()->PackFrom(composite_config);
 
   auto* matcher_tree = extension_with_matcher.mutable_xds_matcher()->mutable_matcher_tree();
   auto* input = matcher_tree->mutable_input();
   input->set_name("match-input");
-  input->mutable_typed_config()->PackFrom(match_input);
+  std::ignore = input->mutable_typed_config()->PackFrom(match_input);
 
   envoy::extensions::filters::http::composite::v3::ExecuteFilterAction execute_filter_action;
   auto* typed_config = execute_filter_action.mutable_typed_config();
   typed_config->set_name("envoy.filters.http.ext_proc");
-  typed_config->mutable_typed_config()->PackFrom(proto_config_);
+  std::ignore = typed_config->mutable_typed_config()->PackFrom(proto_config_);
 
   auto& on_match = (*matcher_tree->mutable_exact_match_map()->mutable_map())["match"];
   on_match.mutable_action()->set_name("composite-action");
-  on_match.mutable_action()->mutable_typed_config()->PackFrom(execute_filter_action);
+  std::ignore = on_match.mutable_action()->mutable_typed_config()->PackFrom(execute_filter_action);
 
-  composite_filter.mutable_typed_config()->PackFrom(extension_with_matcher);
+  std::ignore = composite_filter.mutable_typed_config()->PackFrom(extension_with_matcher);
   config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrError(composite_filter),
                                true);
 }
@@ -1074,7 +1133,7 @@ void ExtProcIntegrationTest::initializeLogConfig(std::string& access_log_path) {
     (*json_format->mutable_fields())["field_non_existent"].set_string_value(
         "%FILTER_STATE(envoy.filters.http.ext_proc:FIELD:non_existent_field)%");
 
-    access_log->mutable_typed_config()->PackFrom(access_log_config);
+    std::ignore = access_log->mutable_typed_config()->PackFrom(access_log_config);
   });
 }
 

@@ -1,6 +1,7 @@
 #include "source/extensions/filters/http/compressor/compressor_filter.h"
 
 #include <cstdint>
+#include <optional>
 
 #include "envoy/compression/compressor/config.h"
 #include "envoy/registry/registry.h"
@@ -13,7 +14,6 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_cat.h"
-#include "absl/types/optional.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -311,7 +311,7 @@ void CompressorFilter::setDecoderFilterCallbacks(Http::StreamDecoderFilterCallba
   // the method isAcceptEncodingAllowed() the first filter is making a decision which encoder needs
   // to be used for a request, with e.g. "Accept-Encoding: deflate;q=0.75, gzip;q=0.5", and caches
   // it in the state. All other compression filters in the sequence use the cached decision.
-  const StreamInfo::FilterStateSharedPtr& filter_state = callbacks.streamInfo().filterState();
+  const StreamInfo::FilterStateSharedPtr& filter_state = streamInfo().filterState();
   if (auto registry = filter_state->getDataMutable<CompressorRegistry>(key); registry != nullptr) {
     registry->filter_configs_.push_back(config_);
   } else {
@@ -327,7 +327,7 @@ bool isResponseCodeCompressible(const Http::ResponseHeaderMap& headers,
     return true;
   }
 
-  absl::optional<uint64_t> response_code = Http::Utility::getResponseStatusOrNullopt(headers);
+  std::optional<uint64_t> response_code = Http::Utility::getResponseStatusOrNullopt(headers);
   if (!response_code.has_value()) {
     return true;
   }
@@ -519,8 +519,7 @@ CompressorFilter::chooseEncoding(const Http::ResponseHeaderMap& headers) const {
   uint32_t registration_count{0};
 
   auto typed_state =
-      decoder_callbacks_->streamInfo().filterState()->getDataReadOnly<CompressorRegistry>(
-          compressorRegistryKey());
+      streamInfo().filterState()->getDataReadOnly<CompressorRegistry>(compressorRegistryKey());
   ASSERT(typed_state != nullptr);
 
   for (const auto& filter_config : (*typed_state).filter_configs_) {
@@ -696,8 +695,7 @@ bool CompressorFilter::isAcceptEncodingAllowed(const Http::ResponseHeaderMap& he
   const absl::string_view encoding_decision_key{"encoding_decision"};
 
   // Check if we have already cached our decision on encoding.
-  const StreamInfo::FilterStateSharedPtr& filter_state =
-      decoder_callbacks_->streamInfo().filterState();
+  const StreamInfo::FilterStateSharedPtr& filter_state = streamInfo().filterState();
   if (auto typed_state =
           filter_state->getDataReadOnly<CompressorFilter::EncodingDecision>(encoding_decision_key);
       typed_state != nullptr) {
@@ -717,7 +715,7 @@ bool CompressorFilterConfig::DirectionConfig::isContentTypeAllowed(
   if (content_type != nullptr && !content_type_values_.empty()) {
     const absl::string_view value =
         StringUtil::trim(StringUtil::cropRight(content_type->value().getStringView(), ";"));
-    return content_type_values_.find(value) != content_type_values_.end();
+    return content_type_values_.contains(value);
   }
 
   return true;
@@ -795,7 +793,7 @@ bool CompressorFilter::isTransferEncodingAllowed(Http::RequestOrResponseHeaderMa
 
 std::string CompressorFilter::createEnvoyCompressionStatusHeaderValue(
     absl::string_view encoding_type, absl::string_view status_to_set,
-    absl::optional<absl::string_view> original_length) {
+    std::optional<absl::string_view> original_length) {
   const auto& constants = Http::Headers::get().EnvoyCompressionStatusValues;
   if (status_to_set == constants.Compressed && original_length.has_value()) {
     std::string original_length_part =
@@ -807,7 +805,7 @@ std::string CompressorFilter::createEnvoyCompressionStatusHeaderValue(
 
 void CompressorFilter::insertEnvoyCompressionStatusHeader(
     Http::ResponseHeaderMap& headers, absl::string_view encoding_type,
-    absl::string_view status_to_set, absl::optional<absl::string_view> original_length) {
+    absl::string_view status_to_set, std::optional<absl::string_view> original_length) {
   std::string status_value =
       createEnvoyCompressionStatusHeaderValue(encoding_type, status_to_set, original_length);
   headers.addReferenceKey(Http::Headers::get().EnvoyCompressionStatus, status_value);
@@ -886,6 +884,14 @@ std::string CompressorFilter::getContentEncoding() const {
     return per_route_config_->contentEncoding().value();
   }
   return config_->contentEncoding();
+}
+
+StreamInfo::StreamInfo& CompressorFilter::streamInfo() const {
+  if (decoder_callbacks_ != nullptr && decoder_callbacks_->upstreamCallbacks().has_value()) {
+    return decoder_callbacks_->upstreamCallbacks()->upstreamStreamInfo();
+  }
+  ASSERT(decoder_callbacks_ != nullptr);
+  return decoder_callbacks_->streamInfo();
 }
 
 } // namespace Compressor

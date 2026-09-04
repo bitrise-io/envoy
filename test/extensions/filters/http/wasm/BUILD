@@ -42,7 +42,7 @@ envoy_extension_cc_test(
         "//test/extensions/filters/http/wasm/test_data:shared_queue_rust.wasm",
     ]),
     extension_names = ["envoy.filters.http.wasm"],
-    rbe_pool = "4core",
+    rbe_pool = "linux_x64_large",
     shard_count = 50,
     tags = [
         "cpu:4",
@@ -68,7 +68,7 @@ envoy_extension_cc_test(
         "//test/extensions/filters/http/wasm/test_data:test_cpp.wasm",
     ]),
     extension_names = ["envoy.filters.http.wasm"],
-    rbe_pool = "4core",
+    rbe_pool = "linux_x64_large",
     shard_count = 16,
     tags = ["skip_on_windows"],
     deps = [
@@ -82,6 +82,7 @@ envoy_extension_cc_test(
         "//test/mocks/network:network_mocks",
         "//test/mocks/server:server_mocks",
         "//test/test_common:environment_lib",
+        "//test/test_common:test_runtime_lib",
         "@envoy_api//envoy/extensions/filters/http/wasm/v3:pkg_cc_proto",
     ],
 )
@@ -96,7 +97,7 @@ envoy_extension_cc_test(
         "//test/extensions/filters/http/wasm/test_data:deferred_data_rust.wasm",
     ]),
     extension_names = ["envoy.filters.http.wasm"],
-    rbe_pool = "4core",
+    rbe_pool = "linux_x64_large",
     shard_count = 16,
     tags = ["skip_on_windows"],
     deps = [

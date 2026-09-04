@@ -21,14 +21,14 @@ TEST(SendTrailersTest, Success) {
   typed_config.set_type_url(
       "type.googleapis.com/envoymobile.extensions.filters.http.assertion.Assertion");
   std::string serialized_assertion;
-  assertion.SerializeToString(&serialized_assertion);
+  std::ignore = assertion.SerializeToString(&serialized_assertion);
   typed_config.set_value(serialized_assertion);
 
   absl::Notification engine_running;
   Platform::EngineBuilder engine_builder;
   engine_builder.enforceTrustChainVerification(false)
       .enableLogger(false)
-      .setLogLevel(Logger::Logger::debug)
+      .setLogLevel(Logger::Levels::debug)
       .addNativeFilter("envoy.filters.http.assertion", typed_config)
 
       .setOnEngineRunning([&]() { engine_running.Notify(); });

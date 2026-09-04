@@ -24,16 +24,16 @@ envoy_cc_library(
     name = "substitution_formatter_interface",
     hdrs = [
         "substitution_formatter.h",
-        "substitution_formatter_base.h",
     ],
     deps = [
         ":http_formatter_context_interface",
+        "//envoy/common:optref_lib",
         "//envoy/common:pure_lib",
         "//envoy/config:typed_config_interface",
         "//envoy/server:factory_context_interface",
         "//envoy/stream_info:stream_info_interface",
         "//source/common/protobuf",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/types:optional",
     ],
 )

@@ -47,15 +47,17 @@ public:
     ASSERT(false, "not supported");
     return INVALID_SOCKET;
   }
+  void setAbortiveClose() override;
   Api::IoCallUint64Result close() override;
   bool isOpen() const override;
   bool wasConnected() const override;
   Api::IoCallUint64Result readv(uint64_t max_length, Buffer::RawSlice* slices,
                                 uint64_t num_slice) override;
   Api::IoCallUint64Result read(Buffer::Instance& buffer,
-                               absl::optional<uint64_t> max_length_opt) override;
+                               std::optional<uint64_t> max_length_opt) override;
   Api::IoCallUint64Result writev(const Buffer::RawSlice* slices, uint64_t num_slice) override;
   Api::IoCallUint64Result write(Buffer::Instance& buffer) override;
+  Api::IoCallUint64Result send(const void* buffer, size_t length) override;
   Api::IoCallUint64Result sendmsg(const Buffer::RawSlice* slices, uint64_t num_slice, int flags,
                                   const Network::Address::Ip* self_ip,
                                   const Network::Address::Instance& peer_address) override;
@@ -79,7 +81,7 @@ public:
   Api::SysCallIntResult ioctl(unsigned long, void*, unsigned long, void*, unsigned long,
                               unsigned long*) override;
   Api::SysCallIntResult setBlocking(bool blocking) override;
-  absl::optional<int> domain() override;
+  std::optional<int> domain() override;
   absl::StatusOr<Network::Address::InstanceConstSharedPtr> localAddress() override;
   absl::StatusOr<Network::Address::InstanceConstSharedPtr> peerAddress() override;
 
@@ -91,9 +93,9 @@ public:
   void resetFileEvents() override;
 
   Api::SysCallIntResult shutdown(int how) override;
-  absl::optional<std::chrono::milliseconds> lastRoundTripTime() override { return absl::nullopt; }
-  absl::optional<uint64_t> congestionWindowInBytes() const override { return absl::nullopt; }
-  absl::optional<std::string> interfaceName() override { return absl::nullopt; }
+  std::optional<std::chrono::milliseconds> lastRoundTripTime() override { return std::nullopt; }
+  std::optional<uint64_t> congestionWindowInBytes() const override { return std::nullopt; }
+  std::optional<std::string> interfaceName() override { return std::nullopt; }
 
   void setWatermarks(uint32_t watermark) { pending_received_data_.setWatermarks(watermark); }
   void onBelowLowWatermark() {
@@ -109,6 +111,11 @@ public:
 
   // UserSpace::IoHandle
   void setEof() override {
+    receive_data_end_stream_ = true;
+    setNewDataAvailable();
+  }
+  void setRst() override {
+    receive_data_reset_ = true;
     receive_data_end_stream_ = true;
     setNewDataAvailable();
   }
@@ -175,6 +182,7 @@ private:
   // True if pending_received_data_ is not addable. Note that pending_received_data_ may have
   // pending data to drain.
   bool receive_data_end_stream_{false};
+  bool receive_data_reset_{false};
 
   // The buffer owned by this socket. This buffer is populated by the write operations of the peer
   // socket and drained by read operations of this socket.
@@ -186,6 +194,10 @@ private:
 
   // Indicates whether this handle has sent EOF to the peer by calling setEof().
   bool sent_eof_{false};
+
+  // Set by setAbortiveClose() to indicate that a subsequent close() operation should propagate an
+  // RST (rather than a FIN).
+  bool rst_requested_{false};
 
   // Shared state between peer handles.
   PassthroughStateSharedPtr passthrough_state_{nullptr};

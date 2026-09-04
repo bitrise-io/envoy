@@ -1,3 +1,6 @@
+#include <format>
+#include <optional>
+
 #include "envoy/admin/v3/config_dump.pb.h"
 #include "envoy/api/os_sys_calls.h"
 #include "envoy/common/key_value_store.h"
@@ -31,7 +34,7 @@ std::string kvStoreDelegateConfig() {
   const std::string filename = TestEnvironment::temporaryPath("xds_kv_store.txt");
   Api::OsSysCallsSingleton().get().unlink(filename.c_str());
 
-  return fmt::format(R"EOF(
+  return std::format(R"EOF(
     name: envoy.config.config.KeyValueStoreXdsDelegate
     typed_config:
       "@type": type.googleapis.com/envoy.extensions.config.v3alpha.KeyValueStoreXdsDelegateConfig
@@ -95,7 +98,7 @@ public:
           tls_context.mutable_common_tls_context()->add_tls_certificate_sds_secret_configs();
       setUpSdsConfig(secret_config, CLIENT_CERT_NAME);
       transport_socket->set_name("envoy.transport_sockets.tls");
-      transport_socket->mutable_typed_config()->PackFrom(tls_context);
+      std::ignore = transport_socket->mutable_typed_config()->PackFrom(tls_context);
     });
 
     // Add static runtime values.
@@ -420,10 +423,10 @@ TEST_P(KeyValueStoreXdsDelegateIntegrationTest, BasicSuccess) {
 // A KeyValueStore implementation that returns an invalid proto field value for a Cluster resource.
 class InvalidProtoKeyValueStore : public KeyValueStore {
 public:
-  absl::optional<absl::string_view> get(absl::string_view) override { return absl::nullopt; }
+  std::optional<absl::string_view> get(absl::string_view) override { return std::nullopt; }
   void remove(absl::string_view) override {}
   void addOrUpdate(absl::string_view, absl::string_view,
-                   absl::optional<std::chrono::seconds>) override {}
+                   std::optional<std::chrono::seconds>) override {}
   void flush() override {}
 
   // We only have a cds_config making wildcard requests, so we only need to implement the iterate
@@ -435,7 +438,7 @@ public:
 
     // 9999 is an invalid enum value for LbPolicy.
     auto cluster_resource = TestUtility::parseYaml<envoy::config::cluster::v3::Cluster>(
-        fmt::format(R"EOF(
+        std::format(R"EOF(
          name: {}
          connect_timeout: 5s
          type: STATIC
@@ -453,10 +456,10 @@ public:
     envoy::service::discovery::v3::Resource r;
     r.set_name(cluster_name);
     r.set_version("1");
-    r.mutable_resource()->PackFrom(cluster_resource);
+    std::ignore = r.mutable_resource()->PackFrom(cluster_resource);
 
     std::string value;
-    r.SerializeToString(&value);
+    std::ignore = r.SerializeToString(&value);
 
     cb(key, value);
   }
@@ -501,7 +504,7 @@ public:
       ConfigHelper::setHttp2(*xds_cluster);
 
       auto* cds = bootstrap.mutable_dynamic_resources()->mutable_cds_config();
-      const std::string cds_yaml = fmt::format(R"EOF(
+      const std::string cds_yaml = std::format(R"EOF(
         api_config_source:
           api_type: GRPC
           grpc_services:

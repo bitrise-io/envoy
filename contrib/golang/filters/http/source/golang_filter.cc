@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -1401,7 +1403,7 @@ void Filter::populateSliceWithMetadata(const std::string& filter_name, uint64_t*
   const auto& metadata = streamInfo().dynamicMetadata().filter_metadata();
   const auto filter_it = metadata.find(filter_name);
   if (filter_it != metadata.end()) {
-    filter_it->second.SerializeToString(&req_->strValue);
+    std::ignore = filter_it->second.SerializeToString(&req_->strValue);
     *buf_data = reinterpret_cast<uint64_t>(req_->strValue.data());
     *buf_len = req_->strValue.length();
   }
@@ -1439,7 +1441,7 @@ void Filter::setDynamicMetadataInternal(std::string filter_name, std::string key
                                         const absl::string_view& buf) {
   Protobuf::Struct value;
   Protobuf::Value v;
-  v.ParseFromArray(buf.data(), buf.length());
+  std::ignore = v.ParseFromArray(buf.data(), buf.length());
 
   (*value.mutable_fields())[key] = v;
 
@@ -1552,8 +1554,8 @@ CAPIStatus Filter::getStringPropertyCommon(absl::string_view path, uint64_t* val
   return status;
 }
 
-absl::optional<google::api::expr::runtime::CelValue> Filter::findValue(absl::string_view name,
-                                                                       Protobuf::Arena* arena) {
+std::optional<google::api::expr::runtime::CelValue> Filter::findValue(absl::string_view name,
+                                                                      Protobuf::Arena* arena) {
   // as we already support getting/setting FilterState, we don't need to implement
   // getProperty with non-attribute name & setProperty which actually work on FilterState
   return StreamActivation::FindValue(name, arena);
@@ -1790,7 +1792,7 @@ uint64_t Filter::getMergedConfigId() {
 FilterConfig::FilterConfig(
     const envoy::extensions::filters::http::golang::v3alpha::Config& proto_config,
     Dso::HttpFilterDsoPtr dso_lib, const std::string& stats_prefix,
-    Server::Configuration::FactoryContext& context)
+    Server::Configuration::GenericFactoryContext& context)
     : plugin_name_(proto_config.plugin_name()), so_id_(proto_config.library_id()),
       so_path_(proto_config.library_path()), plugin_config_(proto_config.plugin_config()),
       concurrency_(context.serverFactoryContext().options().concurrency()),
@@ -1798,7 +1800,7 @@ FilterConfig::FilterConfig(
       metric_store_(std::make_shared<MetricStore>(context.scope().createScope(""))),
       secret_reader_(std::make_shared<SecretReader>(proto_config, context)) {};
 
-void FilterConfig::newGoPluginConfig() {
+absl::Status FilterConfig::newGoPluginConfig() {
   ENVOY_LOG(debug, "initializing golang filter config");
   std::string buf;
   auto res = plugin_config_.SerializeToString(&buf);
@@ -1817,11 +1819,12 @@ void FilterConfig::newGoPluginConfig() {
   config_id_ = dso_lib_->envoyGoFilterNewHttpPluginConfig(config_);
 
   if (config_id_ == 0) {
-    throw EnvoyException(
-        fmt::format("golang filter failed to parse plugin config: {} {}", so_id_, so_path_));
+    return absl::InvalidArgumentError(
+        std::format("golang filter failed to parse plugin config: {} {}", so_id_, so_path_));
   }
 
   ENVOY_LOG(debug, "golang filter new plugin config, id: {}", config_id_);
+  return absl::OkStatus();
 }
 
 FilterConfig::~FilterConfig() {
@@ -1974,7 +1977,7 @@ RoutePluginConfig::RoutePluginConfig(
   config_id_ = getConfigId();
   if (config_id_ == 0) {
     throw EnvoyException(
-        fmt::format("golang filter failed to parse plugin config: {}", plugin_name_));
+        std::format("golang filter failed to parse plugin config: {}", plugin_name_));
   }
   ENVOY_LOG(debug, "golang filter new per route '{}' plugin config, id: {}", plugin_name_,
             config_id_);
@@ -2067,7 +2070,7 @@ secretsProvider(const envoy::extensions::transport_sockets::tls::v3::SdsSecretCo
 
 SecretReader::SecretReader(
     const envoy::extensions::filters::http::golang::v3alpha::Config& proto_config,
-    Server::Configuration::FactoryContext& context) {
+    Server::Configuration::GenericFactoryContext& context) {
   if (proto_config.generic_secrets_size() > 0) {
     auto& server_context = context.serverFactoryContext();
     auto& init_manager = context.initManager();
@@ -2090,12 +2093,12 @@ SecretReader::SecretReader(
   }
 }
 
-absl::optional<const std::string> SecretReader::secret(const std::string& name) const {
+std::optional<const std::string> SecretReader::secret(const std::string& name) const {
   auto secret = secrets_.find(name);
   if (secret != secrets_.end()) {
     return secret->second->secret();
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 } // namespace Golang

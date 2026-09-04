@@ -35,6 +35,7 @@ envoy_extension_cc_test(
         "//source/extensions/stat_sinks/open_telemetry:open_telemetry_lib",
         "//test/mocks/grpc:grpc_mocks",
         "//test/mocks/server:server_factory_context_mocks",
+        "//test/test_common:logging_lib",
     ],
 )
 
@@ -55,7 +56,7 @@ envoy_extension_cc_test(
     name = "open_telemetry_integration_test",
     srcs = ["open_telemetry_integration_test.cc"],
     extension_names = ["envoy.stat_sinks.open_telemetry"],
-    rbe_pool = "6gig",
+    rbe_pool = "linux_x64_small",
     deps = [
         "//source/extensions/stat_sinks/open_telemetry:config",
         "//test/integration:http_integration_lib",

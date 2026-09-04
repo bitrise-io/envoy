@@ -156,7 +156,7 @@ Http::FilterHeadersStatus ApiKeyAuthFilter::decodeHeaders(Http::RequestHeaderMap
 
   const auto credential = credentials->find(key_result);
   if (credential == credentials->end()) {
-    return onDenied(Http::Code::Unauthorized, "Client authentication failed.", "unkonwn_api_key");
+    return onDenied(Http::Code::Unauthorized, "Client authentication failed.", "unknown_api_key");
   }
 
   // If route config is not null then check if the client is allowed or not based on the route
@@ -194,7 +194,7 @@ Http::FilterHeadersStatus ApiKeyAuthFilter::onDenied(Http::Code code, absl::stri
     config_->stats().forbidden_.inc();
   }
 
-  decoder_callbacks_->sendLocalReply(code, body, nullptr, absl::nullopt, response_code_details);
+  decoder_callbacks_->sendLocalReply(code, body, nullptr, std::nullopt, response_code_details);
   return Http::FilterHeadersStatus::StopIteration;
 }
 

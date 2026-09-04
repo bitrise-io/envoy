@@ -94,7 +94,11 @@ message HeaderToProxyFilterConfig {
 }
 message ModifyBufferFilterConfig {
 }
+message AddDataAndContinueFilterConfig {
+}
 message ProcessContextFilterConfig {
+}
+message RuntimeFeatureTestFilterConfig {
 }
 message RandomPauseFilterConfig {
 }
@@ -107,4 +111,6 @@ message ResetIdleTimerFilterConfig {
 message ResponseMetadataFilterConfig {
 }
 message AddHeaderEmptyFilterConfig {
+}
+message LocalReplyDuringHostSelectionConfig {
 }

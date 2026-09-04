@@ -2,6 +2,7 @@
 
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -12,12 +13,12 @@
 #include "source/common/common/scope_tracker.h"
 #include "source/common/http/session_idle_list_interface.h"
 #include "source/common/quic/envoy_quic_connection_debug_visitor_factory_interface.h"
-#include "source/common/quic/envoy_quic_proof_source.h"
 #include "source/common/quic/envoy_quic_server_connection.h"
 #include "source/common/quic/envoy_quic_server_stream.h"
 #include "source/common/quic/quic_filter_manager_connection_impl.h"
+#include "source/common/quic/quic_server_transport_socket_factory.h"
+#include "source/common/runtime/runtime_features.h"
 
-#include "absl/types/optional.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_stream.h"
@@ -39,7 +40,7 @@ private:
 
   const ScopeTrackedObject* object_;
   Event::ScopeTracker& tracker_;
-  absl::optional<ScopeTrackerScopeState> state_;
+  std::optional<ScopeTrackerScopeState> state_;
 };
 } // namespace
 
@@ -82,6 +83,21 @@ EnvoyQuicServerSession::~EnvoyQuicServerSession() {
   QuicFilterManagerConnectionImpl::network_connection_ = nullptr;
 }
 
+#ifdef ENVOY_ENABLE_HTTP_DATAGRAMS
+quic::WebTransportHttp3VersionSet
+EnvoyQuicServerSession::LocallySupportedWebTransportVersions() const {
+  if (!Runtime::runtimeFeatureEnabled("envoy.reloadable_features.quic_support_web_transport")) {
+    return {};
+  }
+  if (!http3_options_.has_value() || !http3_options_->allow_extended_connect()) {
+    // WebTransport requires extended CONNECT, so only advertise it when extended CONNECT is
+    // enabled.
+    return {};
+  }
+  return quic::kDefaultSupportedWebTransportVersions;
+}
+#endif
+
 absl::string_view EnvoyQuicServerSession::requestedServerName() const {
   return {GetCryptoStream()->crypto_negotiated_params().sni};
 }
@@ -114,6 +130,17 @@ quic::QuicSpdyStream* EnvoyQuicServerSession::CreateIncomingStream(quic::QuicStr
   if (aboveHighWatermark()) {
     stream->runHighWatermarkCallbacks();
   }
+#ifdef ENVOY_ENABLE_HTTP_DATAGRAMS
+  // On a WebTransport-capable session an incoming bidirectional stream may turn out to be a
+  // WebTransport data stream (first frame WEBTRANSPORT_STREAM) rather than an HTTP request. Defer
+  // setting up the request decoder until real request headers arrive
+  // (EnvoyQuicServerStream::OnInitialHeadersComplete); data streams never reach there and so never
+  // become HCM streams, which would otherwise dangle during connection teardown. Non-WebTransport
+  // sessions keep the original eager behavior.
+  if (SupportsWebTransport()) {
+    return stream;
+  }
+#endif
   setUpRequestDecoder(*stream);
   return stream;
 }
@@ -152,7 +179,12 @@ void EnvoyQuicServerSession::OnConnectionClosed(const quic::QuicConnectionCloseF
 }
 
 void EnvoyQuicServerSession::Initialize() {
+  if (Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.quic_enable_reset_ssl_after_handshake")) {
+    enable_reset_ssl_after_handshake();
+  }
   quic::QuicServerSessionBase::Initialize();
+
   initialized_ = true;
   MaybeAddSessionToIdleList();
   quic_connection_->setEnvoyConnection(*this, *this);
@@ -179,6 +211,17 @@ quic::QuicConnection* EnvoyQuicServerSession::quicConnection() {
 
 void EnvoyQuicServerSession::OnTlsHandshakeComplete() {
   quic::QuicServerSessionBase::OnTlsHandshakeComplete();
+  // The client certificate is already validated by `EnvoyTlsServerHandshaker` before this hook
+  // runs. Surface the validated state to downstream consumers, but only when the matched chain
+  // sets `requiresClientCertificate()`, so a certificate presented to a chain that does not
+  // require one is not marked as validated.
+  if (position_.has_value() && quic_ssl_info_->peerCertificatePresented()) {
+    const auto& transport_socket_factory = dynamic_cast<const QuicServerTransportSocketFactory&>(
+        position_->filter_chain_.transportSocketFactory());
+    if (transport_socket_factory.requiresClientCertificate()) {
+      quic_ssl_info_->onCertValidated();
+    }
+  }
   streamInfo().downstreamTiming().onDownstreamHandshakeComplete(dispatcher_.timeSource());
   raiseConnectionEvent(Network::ConnectionEvent::Connected);
 }
@@ -232,17 +275,33 @@ void EnvoyQuicServerSession::storeConnectionMapPosition(FilterChainToConnectionM
 
 quic::QuicSSLConfig EnvoyQuicServerSession::GetSSLConfig() const {
   quic::QuicSSLConfig config = quic::QuicServerSessionBase::GetSSLConfig();
-  config.early_data_enabled = position_.has_value()
-                                  ? dynamic_cast<const QuicServerTransportSocketFactory&>(
-                                        position_->filter_chain_.transportSocketFactory())
-                                        .earlyDataEnabled()
-                                  : true;
+  if (position_.has_value()) {
+    const auto& transport_socket_factory = dynamic_cast<const QuicServerTransportSocketFactory&>(
+        position_->filter_chain_.transportSocketFactory());
+    config.client_cert_mode = transport_socket_factory.requiresClientCertificate()
+                                  ? quic::ClientCertMode::kRequire
+                                  : quic::ClientCertMode::kNone;
+    // 0-RTT is disabled when a client certificate is required because early data is replayable and
+    // would bypass client certificate validation.
+    config.early_data_enabled = transport_socket_factory.earlyDataEnabled() &&
+                                config.client_cert_mode == quic::ClientCertMode::kNone;
+    config.disable_ticket_support = !transport_socket_factory.resumptionEnabled();
+  } else {
+    config.early_data_enabled = true;
+    config.client_cert_mode = quic::ClientCertMode::kNone;
+    config.disable_ticket_support = false;
+  }
   return config;
 }
 
 void EnvoyQuicServerSession::ProcessUdpPacket(const quic::QuicSocketAddress& self_address,
                                               const quic::QuicSocketAddress& peer_address,
                                               const quic::QuicReceivedPacket& packet) {
+  // The first packet processed by the server session carries the client's initial ClientHello,
+  // so record its arrival as the downstream handshake start. The setter only keeps the first
+  // value, so subsequent packets don't overwrite it.
+  streamInfo().downstreamTiming().onDownstreamHandshakeStart(dispatcher_.timeSource());
+
   // If L4 filters causes the connection to be closed early during initialization, now
   // is the time to actually close the connection.
   maybeHandleCloseDuringInitialize();

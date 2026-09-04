@@ -39,7 +39,6 @@ envoy_basic_cc_library(
     hdrs = [
         "optref.h",
     ],
-    deps = ["@abseil-cpp//absl/types:optional"],
 )
 
 envoy_cc_library(
@@ -161,5 +160,13 @@ envoy_cc_library(
         "//source/common/common:utility_lib",
         "@abseil-cpp//absl/container:inlined_vector",
         "@abseil-cpp//absl/types:variant",
+    ],
+)
+
+envoy_cc_library(
+    name = "logger",
+    hdrs = ["logger.h"],
+    deps = [
+        "@spdlog",
     ],
 )

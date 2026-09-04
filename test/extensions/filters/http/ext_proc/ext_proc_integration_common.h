@@ -1,9 +1,12 @@
 #pragma once
+// Changing the default behavior of ext_proc is generally not allowed. While you may add tests, you
+// generally should not change or remove existing tests.
 
 #include <vector>
 
 #include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/extensions/filters/http/ext_proc/v3/ext_proc.pb.h"
+#include "envoy/extensions/filters/http/set_metadata/v3/set_metadata.pb.h"
 #include "envoy/server/filter_config.h"
 #include "envoy/service/ext_proc/v3/external_processor.pb.h"
 
@@ -57,7 +60,7 @@ struct ConfigOptions {
   FilterSetup filter_setup = FilterSetup::kDownstream;
   bool valid_grpc_server = true;
   bool add_logging_filter = false;
-  absl::optional<LoggingTestFilterConfig> logging_filter_config = absl::nullopt;
+  std::optional<LoggingTestFilterConfig> logging_filter_config = std::nullopt;
   bool http1_codec = false;
   bool add_metadata = false;
   bool add_response_processor = false;
@@ -73,12 +76,24 @@ public:
   }
 
   Http::FilterHeadersStatus encodeHeaders(Http::ResponseHeaderMap& headers, bool) override {
+    // Untyped
     if (decoder_callbacks_->streamInfo().dynamicMetadata().filter_metadata_size() > 0) {
       const auto& md = decoder_callbacks_->streamInfo().dynamicMetadata().filter_metadata();
       for (const auto& md_entry : md) {
         std::string key_prefix = md_entry.first;
         for (const auto& field : md_entry.second.fields()) {
           headers.addCopy(Http::LowerCaseString(key_prefix), field.first);
+        }
+      }
+    }
+    // Typed
+    if (decoder_callbacks_->streamInfo().dynamicMetadata().typed_filter_metadata_size() > 0) {
+      const auto& typed_md =
+          decoder_callbacks_->streamInfo().dynamicMetadata().typed_filter_metadata();
+      for (const auto& md_entry : typed_md) {
+        envoy::extensions::filters::http::set_metadata::v3::Metadata typed_md_val;
+        if (md_entry.second.UnpackTo(&typed_md_val)) {
+          headers.addCopy(Http::LowerCaseString(md_entry.first), typed_md_val.metadata_namespace());
         }
       }
     }
@@ -117,10 +132,10 @@ protected:
   void twoExtProcFiltersFullDuplexConfig();
 
   IntegrationStreamDecoderPtr sendDownstreamRequest(
-      absl::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers);
+      std::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers);
   IntegrationStreamDecoderPtr sendDownstreamRequestWithBody(
       absl::string_view body,
-      absl::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers,
+      std::optional<std::function<void(Http::RequestHeaderMap& headers)>> modify_headers,
       bool add_content_length = false);
   IntegrationStreamDecoderPtr sendDownstreamRequestWithBodyAndTrailer(absl::string_view body);
 
@@ -134,28 +149,34 @@ protected:
 
   void processGenericMessage(
       FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const ProcessingRequest&, ProcessingResponse&)>> cb);
+      std::optional<std::function<bool(const ProcessingRequest&, ProcessingResponse&)>> cb);
   void processRequestHeadersMessage(
       FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb);
+      std::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb);
   void processRequestTrailersMessage(
       FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb);
+      std::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb);
   void processResponseHeadersMessage(
       FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb);
+      std::optional<std::function<bool(const HttpHeaders&, HeadersResponse&)>> cb);
   void
   processRequestBodyMessage(FakeUpstream& grpc_upstream, bool first_message,
-                            absl::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb,
+                            std::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb,
                             bool check_downstream_flow_control = false);
-  void processResponseBodyMessage(
-      FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb);
+  void
+  processResponseBodyMessage(FakeUpstream& grpc_upstream, bool first_message,
+                             std::optional<std::function<bool(const HttpBody&, BodyResponse&)>> cb);
   void processResponseTrailersMessage(
       FakeUpstream& grpc_upstream, bool first_message,
-      absl::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb);
+      std::optional<std::function<bool(const HttpTrailers&, TrailersResponse&)>> cb);
   void processAndRespondImmediately(FakeUpstream& grpc_upstream, bool first_message,
-                                    absl::optional<std::function<void(ImmediateResponse&)>> cb);
+                                    std::optional<std::function<void(ImmediateResponse&)>> cb);
+  // Packing two ProcessingResponses into one gRPC message.
+  // If @param immediate_response is true, the 1st ProcessingResponse is an immediate_response.
+  // Otherwise, the 1st ProcessingResponse is an empty request_trailers response.
+  // The 2nd ProcessingResponse is an empty response_trailers response.
+  void packTwoResponsesInOneMessage(FakeUpstream& grpc_upstream, bool immediate_response,
+                                    std::optional<std::function<void(ImmediateResponse&)>> cb);
 
   // ext_proc server sends back a response to tell Envoy to stop the
   // original timer and start a new timer.
@@ -181,7 +202,8 @@ protected:
 
   void testGetAndFailStream();
   void testGetAndCloseStream();
-  void testSendDyanmicMetadata();
+  void testSendDynamicMetadata();
+  void testSendTypedDynamicMetadata();
   void testSidestreamPushbackDownstream(uint32_t body_size, bool check_downstream_flow_control);
   void initializeConfigDuplexStreamed(bool both_direction = false);
 

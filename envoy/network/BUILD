@@ -24,6 +24,7 @@ envoy_cc_library(
     hdrs = ["connection.h"],
     deps = [
         ":address_interface",
+        ":drain_decision_interface",
         ":filter_interface",
         ":listen_socket_interface",
         "//envoy/buffer:buffer_interface",
@@ -57,7 +58,7 @@ envoy_cc_library(
         ":listener_interface",
         "//envoy/common:random_generator_interface",
         "//envoy/runtime:runtime_interface",
-        "//envoy/ssl:context_interface",
+        "//envoy/server/overload:thread_local_overload_state",
         "//source/common/common:interval_value",
     ],
 )
@@ -109,6 +110,7 @@ envoy_cc_library(
     name = "dns_resolver_interface",
     hdrs = ["dns_resolver.h"],
     deps = [
+        ":dns_interface",
         "//envoy/api:api_interface",
         "//source/common/config:utility_lib",
     ],
@@ -119,6 +121,8 @@ envoy_cc_library(
     hdrs = ["drain_decision.h"],
     deps = [
         "//envoy/common:callback",
+        "//envoy/common:time_interface",
+        "//envoy/server:drain_strategy_interface",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/status",
     ],
@@ -151,7 +155,6 @@ envoy_cc_library(
     hdrs = ["hash_policy.h"],
     deps = [
         ":connection_interface",
-        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -166,7 +169,6 @@ envoy_cc_library(
         "//envoy/event:file_event_interface",
         "//source/common/buffer:buffer_lib",
         "//source/common/common:assert_lib",
-        "@abseil-cpp//absl/types:optional",
     ],
 )
 

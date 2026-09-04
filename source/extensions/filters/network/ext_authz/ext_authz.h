@@ -15,6 +15,7 @@
 #include "envoy/upstream/cluster_manager.h"
 
 #include "source/common/common/matchers.h"
+#include "source/common/protobuf/arena_wrapped_proto.h"
 #include "source/extensions/filters/common/ext_authz/ext_authz.h"
 #include "source/extensions/filters/common/ext_authz/ext_authz_grpc_impl.h"
 
@@ -59,9 +60,9 @@ public:
         send_tls_alert_on_denial_(config.send_tls_alert_on_denial()),
         filter_enabled_metadata_(
             config.has_filter_enabled_metadata()
-                ? absl::optional<Matchers::MetadataMatcher>(
+                ? std::optional<Matchers::MetadataMatcher>(
                       Matchers::MetadataMatcher(config.filter_enabled_metadata(), context))
-                : absl::nullopt),
+                : std::nullopt),
         metadata_context_namespaces_(config.metadata_context_namespaces().begin(),
                                      config.metadata_context_namespaces().end()),
         typed_metadata_context_namespaces_(config.typed_metadata_context_namespaces().begin(),
@@ -100,7 +101,7 @@ private:
   const bool include_peer_certificate_;
   const bool include_tls_session_;
   const bool send_tls_alert_on_denial_;
-  const absl::optional<Matchers::MetadataMatcher> filter_enabled_metadata_;
+  const std::optional<Matchers::MetadataMatcher> filter_enabled_metadata_;
   const std::vector<std::string> metadata_context_namespaces_;
   const std::vector<std::string> typed_metadata_context_namespaces_;
 };
@@ -153,7 +154,7 @@ private:
   bool filterEnabled(const envoy::config::core::v3::Metadata& metadata) {
     return config_->filterEnabledMetadata(metadata);
   }
-  absl::optional<MonotonicTime> start_time_;
+  std::optional<MonotonicTime> start_time_;
 
   ConfigSharedPtr config_;
   Filters::Common::ExtAuthz::ClientPtr client_;
@@ -162,7 +163,7 @@ private:
   FilterReturn filter_return_{FilterReturn::Stop};
   // Used to identify if the callback to onComplete() is synchronous (on the stack) or asynchronous.
   bool calling_check_{};
-  envoy::service::auth::v3::CheckRequest check_request_;
+  ArenaWrappedProto<envoy::service::auth::v3::CheckRequest> check_request_;
 };
 } // namespace ExtAuthz
 } // namespace NetworkFilters

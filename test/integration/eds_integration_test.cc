@@ -12,10 +12,15 @@
 #include "test/test_common/network_utility.h"
 #include "test/test_common/test_runtime.h"
 
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
+using testing::Contains;
 using testing::Eq;
 using testing::Ge;
+using testing::Key;
+using testing::UnorderedElementsAre;
+
 namespace Envoy {
 namespace {
 
@@ -90,10 +95,10 @@ public:
     uint32_t healthy_endpoints = 0;
     uint32_t degraded_endpoints = 0;
     uint32_t disable_active_hc_endpoints = 0;
-    absl::optional<uint32_t> load_balancing_weight = absl::nullopt;
-    absl::optional<bool> weighted_priority_health = absl::nullopt;
-    absl::optional<uint32_t> overprovisioning_factor = absl::nullopt;
-    absl::optional<uint32_t> drop_overload_numerator = absl::nullopt;
+    std::optional<uint32_t> load_balancing_weight = std::nullopt;
+    std::optional<bool> weighted_priority_health = std::nullopt;
+    std::optional<uint32_t> overprovisioning_factor = std::nullopt;
+    std::optional<uint32_t> drop_overload_numerator = std::nullopt;
   };
 
   // We need to supply the endpoints via EDS to provide health status. Use a
@@ -610,8 +615,7 @@ TEST_P(EdsIntegrationTest, OverprovisioningFactorUpdate) {
   setEndpoints(options);
   auto get_and_compare = [this](const uint32_t expected_factor) {
     const auto& cluster_map = test_server_->server().clusterManager().clusters();
-    EXPECT_EQ(1, cluster_map.active_clusters_.size());
-    EXPECT_EQ(1, cluster_map.active_clusters_.count("cluster_0"));
+    EXPECT_THAT(cluster_map.active_clusters_, UnorderedElementsAre(Key("cluster_0")));
     const auto& cluster_ref = cluster_map.active_clusters_.find("cluster_0")->second;
     const auto& hostset_per_priority = cluster_ref.get().prioritySet().hostSetsPerPriority();
     EXPECT_EQ(1, hostset_per_priority.size());
@@ -636,8 +640,7 @@ TEST_P(EdsIntegrationTest, WeightedPriorityHealthUpdate) {
   setEndpoints(options);
   auto get_and_compare = [this](bool expected) {
     const auto& cluster_map = test_server_->server().clusterManager().clusters();
-    EXPECT_EQ(1, cluster_map.active_clusters_.size());
-    EXPECT_EQ(1, cluster_map.active_clusters_.count("cluster_0"));
+    EXPECT_THAT(cluster_map.active_clusters_, UnorderedElementsAre(Key("cluster_0")));
     const auto& cluster_ref = cluster_map.active_clusters_.find("cluster_0")->second;
     const auto& hostset_per_priority = cluster_ref.get().prioritySet().hostSetsPerPriority();
     EXPECT_EQ(1, hostset_per_priority.size());

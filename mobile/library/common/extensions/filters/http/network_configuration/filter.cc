@@ -33,8 +33,6 @@ void NetworkConfigurationFilter::setDecoderFilterCallbacks(
       StreamInfo::FilterState::LifeSpan::Request);
 
   auto options = std::make_shared<Network::Socket::Options>();
-  connectivity_manager_->setInterfaceBindingEnabled(enable_interface_binding_);
-  connectivity_manager_->setDrainPostDnsRefreshEnabled(enable_drain_post_dns_refresh_);
   extra_stream_info_->configuration_key_ = connectivity_manager_->addUpstreamSocketOptions(options);
   decoder_callbacks_->addUpstreamSocketOptions(options);
 }
@@ -58,7 +56,7 @@ bool NetworkConfigurationFilter::onAddressResolved(
   }
   decoder_callbacks_->sendLocalReply(Http::Code::BadRequest,
                                      "Proxy configured but DNS resolution failed", nullptr,
-                                     absl::nullopt, "no_dns_address_for_proxy");
+                                     std::nullopt, "no_dns_address_for_proxy");
   return false;
 }
 
@@ -103,7 +101,7 @@ NetworkConfigurationFilter::resolveProxy(Http::RequestHeaderMap& request_headers
                  "NetworkConfigurationProxy::resolveProxy not running on main thread.");
   ASSERT(proxy_resolver != nullptr, "proxy_resolver must not be null.");
 
-  const std::string target_url = Http::Utility::buildOriginalUri(request_headers, absl::nullopt);
+  const std::string target_url = Http::Utility::buildOriginalUri(request_headers, std::nullopt);
 
   std::weak_ptr<NetworkConfigurationFilter> weak_self = weak_from_this();
   Network::ProxyResolutionResult proxy_resolution_result = proxy_resolver->resolver->resolveProxy(
@@ -158,7 +156,7 @@ Http::FilterHeadersStatus NetworkConfigurationFilter::continueWithProxySettings(
   if (!connectivity_manager_->dnsCache()) {
     decoder_callbacks_->sendLocalReply(Http::Code::BadRequest,
                                        "Proxy configured but no DNS cache available", nullptr,
-                                       absl::nullopt, "no_dns_cache_for_proxy");
+                                       std::nullopt, "no_dns_cache_for_proxy");
     return Http::FilterHeadersStatus::StopIteration;
   }
 
@@ -186,7 +184,7 @@ Http::FilterHeadersStatus NetworkConfigurationFilter::continueWithProxySettings(
   // If DNS lookup straight up fails, fail the request.
   decoder_callbacks_->sendLocalReply(Http::Code::BadRequest,
                                      "Proxy configured but DNS resolution failed", nullptr,
-                                     absl::nullopt, "no_dns_address_for_proxy");
+                                     std::nullopt, "no_dns_address_for_proxy");
   return Http::FilterHeadersStatus::StopIteration;
 }
 

@@ -13,6 +13,7 @@
 #include "source/common/protobuf/protobuf.h"
 #include "source/common/protobuf/utility.h"
 #include "source/common/upstream/upstream_impl.h"
+#include "source/extensions/dynamic_modules/dynamic_module_stats.h"
 #include "source/extensions/dynamic_modules/dynamic_modules.h"
 
 namespace Envoy {
@@ -35,7 +36,7 @@ struct DynamicModuleThreadAwareLoadBalancer : public Upstream::ThreadAwareLoadBa
     Upstream::LoadBalancerPtr create(Upstream::LoadBalancerParams params) override {
       return std::make_unique<DynamicModuleLoadBalancer>(handle_, params.priority_set);
     }
-    bool recreateOnHostChange() const override { return false; }
+    bool recreateOnHostChangeDeprecated() const override { return false; }
 
     DynamicModuleClusterHandleSharedPtr handle_;
   };
@@ -134,6 +135,12 @@ absl::StatusOr<std::shared_ptr<DynamicModuleClusterConfig>> DynamicModuleCluster
   config->on_cluster_lb_on_host_membership_update_ =
       on_lb_membership_update.ok() ? on_lb_membership_update.value() : nullptr;
 
+  auto on_worker_timer_fired =
+      config->dynamic_module_->getFunctionPointer<OnClusterWorkerTimerFiredType>(
+          "envoy_dynamic_module_on_cluster_worker_timer_fired");
+  config->on_cluster_worker_timer_fired_ =
+      on_worker_timer_fired.ok() ? on_worker_timer_fired.value() : nullptr;
+
   // Call on_cluster_config_new to get the in-module configuration.
   envoy_dynamic_module_type_envoy_buffer name_buffer = {config->cluster_name_.data(),
                                                         config->cluster_name_.size()};
@@ -177,7 +184,7 @@ DynamicModuleClusterHandle::~DynamicModuleClusterHandle() {
   Event::Dispatcher& dispatcher = cluster->dispatcher_;
   // The lifecycle handle resets unregister from main-thread-owned notifiers. When the handle is
   // destroyed on a worker thread, post the full teardown onto the main dispatcher.
-  if (!Thread::MainThread::isMainThread() && !Thread::TestThread::isTestThread()) {
+  if (!Thread::MainThread::isMainOrTestThread()) {
     dispatcher.post([cluster = std::move(cluster)]() mutable {
       cluster->server_initialized_handle_.reset();
       cluster->shutdown_handle_.reset();
@@ -213,6 +220,8 @@ DynamicModuleCluster::DynamicModuleCluster(const envoy::config::cluster::v3::Clu
 
   // Initialize the priority set with an empty host set at priority 0.
   priority_set_.getOrCreateHostSet(0);
+  // Allocate and seed the worker slot before worker threads can observe this cluster.
+  ensureWorkerSlot();
 
   registerLifecycleCallbacks();
 }
@@ -385,15 +394,30 @@ bool DynamicModuleCluster::addHosts(
     const std::vector<std::string>& sub_zones,
     const std::vector<std::vector<std::tuple<std::string, std::string, std::string>>>& metadata,
     std::vector<Upstream::HostSharedPtr>& result_hosts, uint32_t priority) {
+  return addHosts(addresses, absl::Span<const absl::string_view>(), weights, regions, zones,
+                  sub_zones, metadata, result_hosts, priority);
+}
+
+bool DynamicModuleCluster::addHosts(
+    const std::vector<std::string>& addresses, absl::Span<const absl::string_view> hostnames,
+    const std::vector<uint32_t>& weights, const std::vector<std::string>& regions,
+    const std::vector<std::string>& zones, const std::vector<std::string>& sub_zones,
+    const std::vector<std::vector<std::tuple<std::string, std::string, std::string>>>& metadata,
+    std::vector<Upstream::HostSharedPtr>& result_hosts, uint32_t priority) {
   ASSERT(addresses.size() == weights.size());
   ASSERT(addresses.size() == regions.size());
   ASSERT(addresses.size() == zones.size());
   ASSERT(addresses.size() == sub_zones.size());
+  ASSERT(hostnames.empty() || hostnames.size() == addresses.size());
   ASSERT(metadata.empty() || metadata.size() == addresses.size());
   result_hosts.clear();
   result_hosts.reserve(addresses.size());
 
   auto cluster_info = info();
+
+  // Cross-priority address map maintained by the priority set; used to skip addresses already in
+  // the cluster without copying the host set.
+  const auto existing_hosts = priority_set_.crossPriorityHostMap();
 
   for (size_t i = 0; i < addresses.size(); ++i) {
     if (weights[i] == 0 || weights[i] > 128) {
@@ -406,6 +430,11 @@ bool DynamicModuleCluster::addHosts(
     if (resolved_address == nullptr) {
       ENVOY_LOG(error, "Invalid address: {}.", addresses[i]);
       return false;
+    }
+
+    // Skip addresses already in the host set. This does not deduplicate within the batch.
+    if (existing_hosts != nullptr && existing_hosts->contains(resolved_address->asString())) {
+      continue;
     }
 
     auto locality = std::make_shared<envoy::config::core::v3::Locality>();
@@ -430,9 +459,12 @@ bool DynamicModuleCluster::addHosts(
       endpoint_metadata = std::move(md);
     }
 
+    const std::string hostname = hostnames.empty() || hostnames[i].empty()
+                                     ? cluster_info->name() + addresses[i]
+                                     : std::string(hostnames[i]);
     auto host_result = Upstream::HostImpl::create(
-        cluster_info, cluster_info->name() + addresses[i], std::move(resolved_address),
-        std::move(endpoint_metadata), nullptr, weights[i], std::move(locality),
+        cluster_info, hostname, std::move(resolved_address), std::move(endpoint_metadata), nullptr,
+        weights[i], std::move(locality),
         envoy::config::endpoint::v3::Endpoint::HealthCheckConfig().default_instance(), 0,
         envoy::config::core::v3::UNKNOWN);
     if (!host_result.ok()) {
@@ -440,6 +472,13 @@ bool DynamicModuleCluster::addHosts(
       return false;                                                             // LCOV_EXCL_LINE
     }
     result_hosts.emplace_back(std::move(host_result.value()));
+  }
+
+  // Every incoming address was already present in the host set, so there is nothing to add. Return
+  // without rebuilding and republishing the unchanged host set, which would otherwise fan out a
+  // no-op membership update to every worker.
+  if (result_hosts.empty()) {
+    return true;
   }
 
   {
@@ -461,7 +500,7 @@ bool DynamicModuleCluster::addHosts(
 
   priority_set_.updateHosts(
       priority, Upstream::HostSetImpl::partitionHosts(all_hosts, std::move(hosts_per_locality)), {},
-      added_hosts, {}, absl::nullopt, absl::nullopt);
+      added_hosts, {}, std::nullopt, std::nullopt);
 
   ENVOY_LOG(debug, "Added {} hosts to dynamic module cluster at priority {}.", result_hosts.size(),
             priority);
@@ -500,7 +539,7 @@ bool DynamicModuleCluster::updateHostHealth(Upstream::HostSharedPtr host,
         auto hosts_per_locality = buildHostsPerLocality(*all_hosts);
         priority_set_.updateHosts(
             p, Upstream::HostSetImpl::partitionHosts(all_hosts, std::move(hosts_per_locality)), {},
-            {}, {}, absl::nullopt, absl::nullopt);
+            {}, {}, std::nullopt, std::nullopt);
         ENVOY_LOG(debug, "Updated health status for host to {} at priority {}.",
                   static_cast<int>(health_status), p);
         return true;
@@ -578,7 +617,7 @@ size_t DynamicModuleCluster::removeHosts(const std::vector<Upstream::HostSharedP
 
   priority_set_.updateHosts(
       0, Upstream::HostSetImpl::partitionHosts(remaining_hosts, std::move(hosts_per_locality)), {},
-      {}, removed_hosts, absl::nullopt, absl::nullopt);
+      {}, removed_hosts, std::nullopt, std::nullopt);
 
   ENVOY_LOG(debug, "Removed {} hosts from dynamic module cluster.", removed_hosts.size());
   return removed_hosts.size();
@@ -768,6 +807,11 @@ DynamicModuleLoadBalancer::chooseHost(Upstream::LoadBalancerContext* context) {
   // a happens-before relationship via the thread::spawn synchronization in the module.
   const auto* connection = context != nullptr ? context->downstreamConnection() : nullptr;
   active_async_dispatcher_ = connection != nullptr ? &connection->dispatcher() : nullptr;
+  // Capture the worker dispatcher for worker timer creation. Sticky: keep any previously captured
+  // dispatcher when this call has no connection, since the worker dispatcher is stable.
+  if (active_async_dispatcher_ != nullptr) {
+    worker_dispatcher_ = active_async_dispatcher_;
+  }
   active_async_cancelled_ = std::make_shared<std::atomic<bool>>(false);
 
   envoy_dynamic_module_type_cluster_host_envoy_ptr host_ptr = nullptr;
@@ -810,7 +854,7 @@ void DynamicModuleAsyncHostSelectionHandle::cancel() {
 }
 
 const Upstream::PrioritySet& DynamicModuleLoadBalancer::prioritySet() const {
-  return handle_->cluster_->prioritySet();
+  return priority_set_;
 }
 
 bool DynamicModuleLoadBalancer::setHostData(uint32_t priority, size_t index, uintptr_t data) {
@@ -859,37 +903,56 @@ DynamicModuleClusterFactory::createClusterWithConfig(
     const envoy::extensions::clusters::dynamic_modules::v3::ClusterConfig& proto_config,
     Upstream::ClusterFactoryContext& context) {
 
-  // Validate that CLUSTER_PROVIDED LB policy is used.
-  if (cluster.lb_policy() != envoy::config::cluster::v3::Cluster::CLUSTER_PROVIDED) {
+  // CLUSTER_PROVIDED uses the module's load balancer; the native policies use Envoy's factory
+  // load balancer, with the module supplying only host discovery.
+  const auto policy = cluster.lb_policy();
+  const bool is_module_lb = (policy == envoy::config::cluster::v3::Cluster::CLUSTER_PROVIDED);
+  const bool is_native_lb = (policy == envoy::config::cluster::v3::Cluster::LEAST_REQUEST ||
+                             policy == envoy::config::cluster::v3::Cluster::ROUND_ROBIN ||
+                             policy == envoy::config::cluster::v3::Cluster::RANDOM ||
+                             policy == envoy::config::cluster::v3::Cluster::RING_HASH ||
+                             policy == envoy::config::cluster::v3::Cluster::MAGLEV);
+
+  if (!is_module_lb && !is_native_lb) {
     return absl::InvalidArgumentError(
         fmt::format("cluster: LB policy {} is not valid for cluster type "
-                    "'envoy.clusters.dynamic_modules'. Only 'CLUSTER_PROVIDED' is allowed.",
-                    envoy::config::cluster::v3::Cluster::LbPolicy_Name(cluster.lb_policy())));
+                    "'envoy.clusters.dynamic_modules'. Supported policies are CLUSTER_PROVIDED, "
+                    "LEAST_REQUEST, ROUND_ROBIN, RANDOM, RING_HASH, and MAGLEV.",
+                    envoy::config::cluster::v3::Cluster::LbPolicy_Name(policy)));
   }
+
+  Server::Configuration::ServerFactoryContext& server_context = context.serverFactoryContext();
+  Stats::Scope& server_scope = server_context.serverScope();
 
   // Extract cluster_config from the Any field.
   std::string cluster_config_bytes;
   if (proto_config.has_cluster_config()) {
     auto config_or_error = MessageUtil::knownAnyToBytes(proto_config.cluster_config());
-    RETURN_IF_NOT_OK_REF(config_or_error.status());
+    if (!config_or_error.ok()) {
+      Envoy::Extensions::DynamicModules::incrementLoadFailure(
+          server_context, proto_config.cluster_name(),
+          Envoy::Extensions::DynamicModules::ConfigInitErrorStat);
+      return config_or_error.status();
+    }
     cluster_config_bytes = std::move(config_or_error.value());
   }
 
-  // Load the dynamic module.
+  // Load the dynamic module. Dynamic module clusters do not support remote module sources, so no
+  // init manager or async callback is passed; only the synchronous local-file and by-name paths
+  // can succeed here.
   const auto& module_config = proto_config.dynamic_module_config();
-  auto module_or_error = Envoy::Extensions::DynamicModules::newDynamicModuleByName(
-      module_config.name(), module_config.do_not_close(), module_config.load_globally());
-  if (!module_or_error.ok()) {
-    return absl::InvalidArgumentError(fmt::format("Failed to load dynamic module '{}': {}",
-                                                  module_config.name(),
-                                                  module_or_error.status().message()));
-  }
+  auto load_result = Envoy::Extensions::DynamicModules::newDynamicModuleByConfig(
+      module_config, proto_config.cluster_name(), context.serverFactoryContext());
+  RETURN_IF_NOT_OK_REF(load_result.status());
+  auto dynamic_module = std::move(load_result->loaded);
 
   // Create the cluster configuration.
   auto config_or_error = DynamicModuleClusterConfig::create(
-      proto_config.cluster_name(), cluster_config_bytes, std::move(module_or_error.value()),
-      context.serverFactoryContext().serverScope());
+      proto_config.cluster_name(), cluster_config_bytes, std::move(dynamic_module), server_scope);
   if (!config_or_error.ok()) {
+    Envoy::Extensions::DynamicModules::incrementLoadFailure(
+        server_context, proto_config.cluster_name(),
+        Envoy::Extensions::DynamicModules::ConfigInitErrorStat);
     return config_or_error.status();
   }
 
@@ -899,9 +962,13 @@ DynamicModuleClusterFactory::createClusterWithConfig(
       cluster, std::move(config_or_error.value()), context, creation_status));
   RETURN_IF_NOT_OK(creation_status);
 
-  // Create the thread-aware load balancer.
-  auto handle = std::make_shared<DynamicModuleClusterHandle>(new_cluster);
-  auto lb = std::make_unique<DynamicModuleThreadAwareLoadBalancer>(handle);
+  // Create the thread-aware load balancer only if the module provides LB (CLUSTER_PROVIDED).
+  // For native LB policies, return nullptr so the cluster manager builds the native factory LB.
+  Upstream::ThreadAwareLoadBalancerPtr lb;
+  if (cluster.lb_policy() == envoy::config::cluster::v3::Cluster::CLUSTER_PROVIDED) {
+    auto handle = std::make_shared<DynamicModuleClusterHandle>(new_cluster);
+    lb = std::make_unique<DynamicModuleThreadAwareLoadBalancer>(handle);
+  }
 
   return std::make_pair(std::move(new_cluster), std::move(lb));
 }

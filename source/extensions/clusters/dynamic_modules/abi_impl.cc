@@ -2,12 +2,22 @@
 
 // This file provides host-side implementations for the cluster dynamic module ABI callbacks.
 
+#include <chrono>
+#include <cstring>
+
+#include "envoy/registry/registry.h"
+
 #include "source/common/common/assert.h"
+#include "source/common/common/safe_memcpy.h"
 #include "source/common/common/thread.h"
 #include "source/common/http/message_impl.h"
+#include "source/common/protobuf/protobuf.h"
 #include "source/common/router/string_accessor_impl.h"
 #include "source/extensions/clusters/dynamic_modules/cluster.h"
 #include "source/extensions/dynamic_modules/abi/abi.h"
+#include "source/extensions/dynamic_modules/abi_context_accessors.h"
+
+using Envoy::Extensions::DynamicModules::ContextAccessor;
 
 namespace {
 
@@ -106,29 +116,22 @@ Envoy::Stats::StatNameTagVector buildTagsForClusterMetric(
   return tags;
 }
 
-} // namespace
-
-extern "C" {
-
-bool envoy_dynamic_module_callback_cluster_add_hosts(
-    envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr, uint32_t priority,
-    const envoy_dynamic_module_type_module_buffer* addresses, const uint32_t* weights,
-    const envoy_dynamic_module_type_module_buffer* regions,
-    const envoy_dynamic_module_type_module_buffer* zones,
-    const envoy_dynamic_module_type_module_buffer* sub_zones,
-    const envoy_dynamic_module_type_module_buffer* metadata_pairs, size_t metadata_pairs_per_host,
-    size_t count, envoy_dynamic_module_type_cluster_host_envoy_ptr* result_host_ptrs) {
-  // `cluster_add_hosts` mutates `priority_set_` and runs member-update callbacks; both are
-  // main-thread-only. The previous `ASSERT_IS_MAIN_OR_TEST_THREAD` is compiled out under NDEBUG,
-  // so guard explicitly and fail closed.
-  if (!Envoy::Thread::MainThread::isMainOrTestThread()) {
-    IS_ENVOY_BUG(
-        "envoy_dynamic_module_callback_cluster_add_hosts must be called on the main thread");
-    return false;
-  }
+bool addHosts(envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr, uint32_t priority,
+              const envoy_dynamic_module_type_module_buffer* addresses,
+              const envoy_dynamic_module_type_module_buffer* hostnames, const uint32_t* weights,
+              const envoy_dynamic_module_type_module_buffer* regions,
+              const envoy_dynamic_module_type_module_buffer* zones,
+              const envoy_dynamic_module_type_module_buffer* sub_zones,
+              const envoy_dynamic_module_type_module_buffer* metadata_pairs,
+              size_t metadata_pairs_per_host, size_t count,
+              envoy_dynamic_module_type_cluster_host_envoy_ptr* result_host_ptrs) {
   auto* cluster = getCluster(cluster_envoy_ptr);
   std::vector<std::string> address_strings;
   address_strings.reserve(count);
+  std::vector<absl::string_view> hostname_views;
+  if (hostnames != nullptr) {
+    hostname_views.reserve(count);
+  }
   std::vector<uint32_t> weight_vec(weights, weights + count);
   std::vector<std::string> region_strings;
   region_strings.reserve(count);
@@ -138,6 +141,11 @@ bool envoy_dynamic_module_callback_cluster_add_hosts(
   sub_zone_strings.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     address_strings.emplace_back(addresses[i].ptr, addresses[i].length);
+    if (hostnames != nullptr) {
+      hostname_views.emplace_back(hostnames[i].length == 0
+                                      ? absl::string_view()
+                                      : absl::string_view(hostnames[i].ptr, hostnames[i].length));
+    }
     region_strings.emplace_back(regions[i].ptr, regions[i].length);
     zone_strings.emplace_back(zones[i].ptr, zones[i].length);
     sub_zone_strings.emplace_back(sub_zones[i].ptr, sub_zones[i].length);
@@ -161,7 +169,7 @@ bool envoy_dynamic_module_callback_cluster_add_hosts(
   }
 
   std::vector<Envoy::Upstream::HostSharedPtr> result_hosts;
-  if (!cluster->addHosts(address_strings, weight_vec, region_strings, zone_strings,
+  if (!cluster->addHosts(address_strings, hostname_views, weight_vec, region_strings, zone_strings,
                          sub_zone_strings, metadata_vec, result_hosts, priority)) {
     return false;
   }
@@ -169,6 +177,48 @@ bool envoy_dynamic_module_callback_cluster_add_hosts(
     result_host_ptrs[i] = const_cast<Envoy::Upstream::Host*>(result_hosts[i].get());
   }
   return true;
+}
+
+} // namespace
+
+extern "C" {
+
+bool envoy_dynamic_module_callback_cluster_add_hosts(
+    envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr, uint32_t priority,
+    const envoy_dynamic_module_type_module_buffer* addresses, const uint32_t* weights,
+    const envoy_dynamic_module_type_module_buffer* regions,
+    const envoy_dynamic_module_type_module_buffer* zones,
+    const envoy_dynamic_module_type_module_buffer* sub_zones,
+    const envoy_dynamic_module_type_module_buffer* metadata_pairs, size_t metadata_pairs_per_host,
+    size_t count, envoy_dynamic_module_type_cluster_host_envoy_ptr* result_host_ptrs) {
+  // `cluster_add_hosts` mutates `priority_set_` and runs member-update callbacks; both are
+  // main-thread-only. The previous `ASSERT_IS_MAIN_OR_TEST_THREAD` is compiled out under NDEBUG,
+  // so guard explicitly and fail closed.
+  if (!Envoy::Thread::MainThread::isMainOrTestThread()) {
+    IS_ENVOY_BUG(
+        "envoy_dynamic_module_callback_cluster_add_hosts must be called on the main thread");
+    return false;
+  }
+  return addHosts(cluster_envoy_ptr, priority, addresses, nullptr, weights, regions, zones,
+                  sub_zones, metadata_pairs, metadata_pairs_per_host, count, result_host_ptrs);
+}
+
+bool envoy_dynamic_module_callback_cluster_add_hosts_with_hostnames(
+    envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr, uint32_t priority,
+    const envoy_dynamic_module_type_module_buffer* addresses,
+    const envoy_dynamic_module_type_module_buffer* hostnames, const uint32_t* weights,
+    const envoy_dynamic_module_type_module_buffer* regions,
+    const envoy_dynamic_module_type_module_buffer* zones,
+    const envoy_dynamic_module_type_module_buffer* sub_zones,
+    const envoy_dynamic_module_type_module_buffer* metadata_pairs, size_t metadata_pairs_per_host,
+    size_t count, envoy_dynamic_module_type_cluster_host_envoy_ptr* result_host_ptrs) {
+  if (!Envoy::Thread::MainThread::isMainOrTestThread()) {
+    IS_ENVOY_BUG("envoy_dynamic_module_callback_cluster_add_hosts_with_hostnames must be called on "
+                 "the main thread");
+    return false;
+  }
+  return addHosts(cluster_envoy_ptr, priority, addresses, hostnames, weights, regions, zones,
+                  sub_zones, metadata_pairs, metadata_pairs_per_host, count, result_host_ptrs);
 }
 
 size_t envoy_dynamic_module_callback_cluster_remove_hosts(
@@ -206,6 +256,14 @@ envoy_dynamic_module_type_cluster_host_envoy_ptr
 envoy_dynamic_module_callback_cluster_find_host_by_address(
     envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr,
     envoy_dynamic_module_type_module_buffer address) {
+  // This reads the main thread cross-priority host map, so it is main-thread-only. An
+  // `ASSERT_IS_MAIN_OR_TEST_THREAD` would be compiled out under NDEBUG, so guard explicitly and
+  // fail closed.
+  if (!Envoy::Thread::MainThread::isMainOrTestThread()) {
+    IS_ENVOY_BUG("envoy_dynamic_module_callback_cluster_find_host_by_address must be called on the "
+                 "main thread");
+    return nullptr;
+  }
   auto* cluster = getCluster(cluster_envoy_ptr);
   std::string address_str(address.ptr, address.length);
   auto host = cluster->findHostByAddress(address_str);
@@ -901,6 +959,43 @@ bool envoy_dynamic_module_callback_cluster_lb_context_get_filter_state_typed(
   return true;
 }
 
+bool envoy_dynamic_module_callback_cluster_lb_context_set_filter_state_bytes(
+    envoy_dynamic_module_type_cluster_lb_context_envoy_ptr context_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer key, envoy_dynamic_module_type_module_buffer value) {
+  if (context_envoy_ptr == nullptr) {
+    return false;
+  }
+  auto* stream_info = getContext(context_envoy_ptr)->requestStreamInfo();
+  if (!stream_info) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "stream info is not available");
+    return false;
+  }
+  return ContextAccessor::setFilterStateBytes(
+      *stream_info, absl::string_view(key.ptr, key.length),
+      absl::string_view(value.ptr, value.length),
+      Envoy::StreamInfo::FilterState::LifeSpan::FilterChain);
+}
+
+bool envoy_dynamic_module_callback_cluster_lb_context_set_filter_state_typed(
+    envoy_dynamic_module_type_cluster_lb_context_envoy_ptr context_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer key, envoy_dynamic_module_type_module_buffer value) {
+  if (context_envoy_ptr == nullptr) {
+    return false;
+  }
+  auto* stream_info = getContext(context_envoy_ptr)->requestStreamInfo();
+  if (!stream_info) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "stream info is not available");
+    return false;
+  }
+
+  return ContextAccessor::setFilterStateTyped(
+      *stream_info, absl::string_view(key.ptr, key.length),
+      absl::string_view(value.ptr, value.length),
+      Envoy::StreamInfo::FilterState::LifeSpan::FilterChain);
+}
+
 uint64_t envoy_dynamic_module_callback_cluster_lb_context_get_host_stat(
     envoy_dynamic_module_type_cluster_lb_context_envoy_ptr context_envoy_ptr,
     envoy_dynamic_module_type_cluster_host_envoy_ptr host_envoy_ptr,
@@ -910,6 +1005,43 @@ uint64_t envoy_dynamic_module_callback_cluster_lb_context_get_host_stat(
   }
   const auto* host = static_cast<const Envoy::Upstream::Host*>(host_envoy_ptr);
   return readHostStat(host->stats(), stat);
+}
+
+bool envoy_dynamic_module_callback_cluster_lb_context_set_dynamic_metadata_number(
+    envoy_dynamic_module_type_cluster_lb_context_envoy_ptr context_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer ns, envoy_dynamic_module_type_module_buffer key,
+    double value) {
+  if (context_envoy_ptr == nullptr) {
+    return false;
+  }
+  auto* stream_info = getContext(context_envoy_ptr)->requestStreamInfo();
+  if (!stream_info) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "stream info is not available");
+    return false;
+  }
+  ContextAccessor::setDynamicMetadataNumber(*stream_info, absl::string_view(ns.ptr, ns.length),
+                                            absl::string_view(key.ptr, key.length), value);
+  return true;
+}
+
+bool envoy_dynamic_module_callback_cluster_lb_context_set_dynamic_metadata_string(
+    envoy_dynamic_module_type_cluster_lb_context_envoy_ptr context_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer ns, envoy_dynamic_module_type_module_buffer key,
+    envoy_dynamic_module_type_module_buffer value) {
+  if (context_envoy_ptr == nullptr) {
+    return false;
+  }
+  auto* stream_info = getContext(context_envoy_ptr)->requestStreamInfo();
+  if (!stream_info) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "stream info is not available");
+    return false;
+  }
+  ContextAccessor::setDynamicMetadataString(*stream_info, absl::string_view(ns.ptr, ns.length),
+                                            absl::string_view(key.ptr, key.length),
+                                            absl::string_view(value.ptr, value.length));
+  return true;
 }
 
 envoy_dynamic_module_type_cluster_scheduler_module_ptr
@@ -961,6 +1093,92 @@ envoy_dynamic_module_callback_cluster_worker_slot_get(
   // Callable from any thread with a TLS registration; the registered-thread guard lives inside
   // DynamicModuleCluster::workerSlotGet().
   return getCluster(cluster_envoy_ptr)->workerSlotGet();
+}
+
+void envoy_dynamic_module_callback_cluster_get_name(
+    envoy_dynamic_module_type_cluster_envoy_ptr cluster_envoy_ptr,
+    envoy_dynamic_module_type_envoy_buffer* result) {
+  const auto& name = getCluster(cluster_envoy_ptr)->clusterName();
+  result->ptr = name.data();
+  result->length = name.size();
+}
+
+// =============================================================================
+// Cluster Worker Timer Callbacks
+// =============================================================================
+
+envoy_dynamic_module_type_cluster_worker_timer_module_ptr
+envoy_dynamic_module_callback_cluster_worker_timer_new(
+    envoy_dynamic_module_type_cluster_lb_envoy_ptr lb_envoy_ptr) {
+  using Envoy::Extensions::Clusters::DynamicModules::DynamicModuleClusterWorkerTimer;
+  using Envoy::Extensions::Clusters::DynamicModules::DynamicModuleLoadBalancer;
+  auto* lb = getLb(lb_envoy_ptr);
+  if (lb == nullptr) {
+    return nullptr;
+  }
+  Envoy::Event::Dispatcher* dispatcher = lb->workerDispatcher();
+  if (dispatcher == nullptr) {
+    // No choose_host has captured a worker dispatcher on this worker yet.
+    return nullptr;
+  }
+  // Allocate the timer wrapper first so we can capture a stable heap pointer in the callback.
+  auto* timer_wrapper = new DynamicModuleClusterWorkerTimer();
+  // Timer create, fire, and delete all run on this worker thread. The empty lambda validates that
+  // the load balancer is still registered (defends against a module that leaks the timer past
+  // on_cluster_lb_destroy) while holding the registry lock only for that check; the module hook
+  // runs outside the lock. A load balancer observed live here cannot be freed during the call,
+  // since its destruction would run on this same worker thread.
+  timer_wrapper->setTimer(dispatcher->createTimer([lb, timer_wrapper]() {
+    if (!DynamicModuleLoadBalancer::withActiveInstance(lb,
+                                                       [](const DynamicModuleLoadBalancer&) {})) {
+      return;
+    }
+    const auto& config = lb->config();
+    if (config->on_cluster_worker_timer_fired_ != nullptr) {
+      config->on_cluster_worker_timer_fired_(lb, lb->inModuleLb(),
+                                             static_cast<void*>(timer_wrapper));
+    }
+  }));
+  return static_cast<void*>(timer_wrapper);
+}
+
+void envoy_dynamic_module_callback_cluster_worker_timer_enable(
+    envoy_dynamic_module_type_cluster_worker_timer_module_ptr timer_ptr,
+    uint64_t delay_milliseconds) {
+  auto* timer =
+      static_cast<Envoy::Extensions::Clusters::DynamicModules::DynamicModuleClusterWorkerTimer*>(
+          timer_ptr);
+  timer->timer().enableTimer(std::chrono::milliseconds(delay_milliseconds));
+}
+
+void envoy_dynamic_module_callback_cluster_worker_timer_disable(
+    envoy_dynamic_module_type_cluster_worker_timer_module_ptr timer_ptr) {
+  auto* timer =
+      static_cast<Envoy::Extensions::Clusters::DynamicModules::DynamicModuleClusterWorkerTimer*>(
+          timer_ptr);
+  timer->timer().disableTimer();
+}
+
+bool envoy_dynamic_module_callback_cluster_worker_timer_enabled(
+    envoy_dynamic_module_type_cluster_worker_timer_module_ptr timer_ptr) {
+  auto* timer =
+      static_cast<Envoy::Extensions::Clusters::DynamicModules::DynamicModuleClusterWorkerTimer*>(
+          timer_ptr);
+  return timer->timer().enabled();
+}
+
+void envoy_dynamic_module_callback_cluster_worker_timer_delete(
+    envoy_dynamic_module_type_cluster_worker_timer_module_ptr timer_ptr) {
+  // The underlying `Event::Timer` is removed from the worker dispatcher's timer list in its
+  // destructor, which is only safe on that worker thread. Guard explicitly since the
+  // ASSERT-based thread check is compiled out under NDEBUG.
+  if (Envoy::Thread::MainThread::isMainOrTestThread()) {
+    IS_ENVOY_BUG("envoy_dynamic_module_callback_cluster_worker_timer_delete must be called "
+                 "on a worker thread");
+    return;
+  }
+  delete static_cast<Envoy::Extensions::Clusters::DynamicModules::DynamicModuleClusterWorkerTimer*>(
+      timer_ptr);
 }
 
 // =============================================================================
@@ -1334,6 +1552,60 @@ bool envoy_dynamic_module_callback_cluster_lb_get_member_update_host_address(
   const auto& address_str = (*hosts)[index]->address()->asStringView();
   result->ptr = address_str.data();
   result->length = address_str.size();
+  return true;
+}
+
+envoy_dynamic_module_type_cluster_host_envoy_ptr
+envoy_dynamic_module_callback_cluster_lb_get_member_update_host(
+    envoy_dynamic_module_type_cluster_lb_envoy_ptr lb_envoy_ptr, size_t index, bool is_added) {
+  if (lb_envoy_ptr == nullptr) {
+    return nullptr;
+  }
+  const auto* hosts =
+      is_added ? getLb(lb_envoy_ptr)->hostsAdded() : getLb(lb_envoy_ptr)->hostsRemoved();
+  if (hosts == nullptr || index >= hosts->size()) {
+    return nullptr;
+  }
+  return const_cast<Envoy::Upstream::Host*>((*hosts)[index].get());
+}
+
+bool envoy_dynamic_module_callback_cluster_lb_get_member_update_host_packed_address(
+    envoy_dynamic_module_type_cluster_lb_envoy_ptr lb_envoy_ptr, size_t index, bool is_added,
+    envoy_dynamic_module_type_packed_address* result) {
+  if (lb_envoy_ptr == nullptr || result == nullptr) {
+    return false;
+  }
+  const auto* hosts =
+      is_added ? getLb(lb_envoy_ptr)->hostsAdded() : getLb(lb_envoy_ptr)->hostsRemoved();
+  if (hosts == nullptr || index >= hosts->size()) {
+    return false;
+  }
+  // Null for a pipe (non-IP) address; the packed representation only covers IP addresses.
+  const auto* ip = (*hosts)[index]->address()->ip();
+  if (ip == nullptr) {
+    return false;
+  }
+  std::memset(result->address_bytes, 0, sizeof(result->address_bytes));
+  // Both accessors return the address in network byte order, read straight from the sockaddr; see
+  // Ipv4/Ipv6Instance in source/common/network/address_impl.{h,cc}.
+  switch (ip->version()) {
+  case Envoy::Network::Address::IpVersion::v4: {
+    result->family = 4;
+    const uint32_t v4 = ip->ipv4()->address();
+    Envoy::safeMemcpyUnsafeDst(result->address_bytes, &v4);
+    break;
+  }
+  case Envoy::Network::Address::IpVersion::v6: {
+    result->family = 6;
+    const absl::uint128 v6 = ip->ipv6()->address();
+    Envoy::safeMemcpyUnsafeDst(result->address_bytes, &v6);
+    break;
+  }
+  default:
+    IS_ENVOY_BUG("unexpected IP version in cluster LB packed address getter");
+    return false;
+  }
+  result->port = static_cast<uint16_t>(ip->port());
   return true;
 }
 

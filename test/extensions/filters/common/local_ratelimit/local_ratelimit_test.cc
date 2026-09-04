@@ -137,6 +137,12 @@ TEST_F(LocalRateLimiterImplTest, TooFastFillRate) {
       EnvoyException, "local rate limit token bucket fill timer must be >= 50ms");
 }
 
+// Verify that max_tokens=0 skips the 50ms fill interval validation since fill is irrelevant.
+TEST_F(LocalRateLimiterImplTest, ZeroMaxTokensSkipsFillIntervalCheck) {
+  VERBOSE_EXPECT_NO_THROW(
+      LocalRateLimiterImpl(std::chrono::milliseconds(10), 0, 1, dispatcher_, descriptors_));
+}
+
 class LocalRateLimiterDescriptorImplTest : public LocalRateLimiterImplTest {
 public:
   void initializeWithAtomicTokenBucketDescriptor(const std::chrono::milliseconds fill_interval,
@@ -323,6 +329,51 @@ TEST_F(LocalRateLimiterDescriptorImplTest, DescriptorRateLimitSmallFillInterval)
   EXPECT_THROW_WITH_MESSAGE(
       LocalRateLimiterImpl(std::chrono::milliseconds(59000), 2, 1, dispatcher_, descriptors_),
       EnvoyException, "local rate limit descriptor token bucket fill timer must be >= 50ms");
+}
+
+// Verify that max_tokens=0 always rejects for both default and per-descriptor token buckets.
+TEST_F(LocalRateLimiterDescriptorImplTest, AlwaysRejectWithZeroMaxTokens) {
+  // Default bucket: max_tokens=0 always rejects regardless of time advancing.
+  initializeWithAtomicTokenBucket(std::chrono::milliseconds(200), 0, 1);
+  EXPECT_FALSE(rate_limiter_->requestAllowed(route_descriptors_).allowed);
+  EXPECT_FALSE(rate_limiter_->requestAllowed(route_descriptors_).allowed);
+  dispatcher_.globalTimeSystem().advanceTimeWait(std::chrono::milliseconds(1000));
+  EXPECT_FALSE(rate_limiter_->requestAllowed(route_descriptors_).allowed);
+
+  // Per-descriptor bucket: max_tokens=0 always rejects regardless of time advancing.
+  TestUtility::loadFromYaml(fmt::format(single_descriptor_config_yaml, 0, 1, "0.1s"),
+                            *descriptors_.Add());
+  initializeWithAtomicTokenBucketDescriptor(std::chrono::milliseconds(50), 1, 1);
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptor_).allowed);
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptor_).allowed);
+  dispatcher_.globalTimeSystem().advanceTimeWait(std::chrono::milliseconds(1000));
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptor_).allowed);
+}
+
+// Verify that a descriptor with max_tokens=0 skips the 50ms fill interval validation.
+TEST_F(LocalRateLimiterDescriptorImplTest, DescriptorZeroMaxTokensSkipsFillIntervalCheck) {
+  TestUtility::loadFromYaml(fmt::format(single_descriptor_config_yaml, 0, 1, "0.010s"),
+                            *descriptors_.Add());
+  VERBOSE_EXPECT_NO_THROW(
+      LocalRateLimiterImpl(std::chrono::milliseconds(50), 1, 1, dispatcher_, descriptors_));
+}
+
+// Verify that a dynamic (wildcard) descriptor with max_tokens=0 always rejects.
+TEST_F(LocalRateLimiterDescriptorImplTest, DynamicDescriptorAlwaysRejectWithZeroMaxTokens) {
+  TestUtility::loadFromYaml(fmt::format(wildcard_descriptor_config_yaml, 0, 1, "0.1s"),
+                            *descriptors_.Add());
+  initializeWithAtomicTokenBucketDescriptor(std::chrono::milliseconds(50), 1, 1);
+
+  std::vector<RateLimit::Descriptor> descriptors{{{{"user", "A"}}}};
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptors).allowed);
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptors).allowed);
+
+  dispatcher_.globalTimeSystem().advanceTimeWait(std::chrono::milliseconds(1000));
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptors).allowed);
+
+  // A different wildcard value also always rejects.
+  std::vector<RateLimit::Descriptor> descriptors2{{{{"user", "B"}}}};
+  EXPECT_FALSE(rate_limiter_->requestAllowed(descriptors2).allowed);
 }
 
 TEST_F(LocalRateLimiterDescriptorImplTest, DuplicateDescriptor) {
@@ -775,6 +826,103 @@ TEST_F(LocalRateLimiterDescriptorImplTest, IsNegativeRefillsTokens) {
   EXPECT_TRUE(result.allowed);
   // 1 + 1 (refill) = 2 tokens remaining.
   EXPECT_EQ(result.token_bucket_context->remainingTokens(), 2);
+}
+
+// Verify shadow mode descriptor failure does not short-circuit enforced descriptor check.
+TEST_F(LocalRateLimiterDescriptorImplTest, ShadowDescriptorDoesNotShortCircuitEnforcedDescriptor) {
+  static constexpr absl::string_view shadow_descriptor_yaml = R"(
+  entries:
+  - key: gate
+    value: shadow
+  token_bucket:
+    max_tokens: 1
+    tokens_per_fill: 1
+    fill_interval: 1000s
+  shadow_mode: true
+  )";
+  static constexpr absl::string_view enforced_descriptor_yaml = R"(
+  entries:
+  - key: gate
+    value: enforced
+  token_bucket:
+    max_tokens: 2
+    tokens_per_fill: 2
+    fill_interval: 100s
+  )";
+
+  TestUtility::loadFromYaml(std::string(shadow_descriptor_yaml), *descriptors_.Add());
+  TestUtility::loadFromYaml(std::string(enforced_descriptor_yaml), *descriptors_.Add());
+  initializeWithAtomicTokenBucketDescriptor(std::chrono::milliseconds(100000), 1000, 1000);
+
+  std::vector<RateLimit::Descriptor> descriptors{
+      {{{"gate", "shadow"}}},
+      {{{"gate", "enforced"}}},
+  };
+
+  // Request 1: shadow (1 -> 0), enforced (2 -> 1). Allowed.
+  auto res1 = rate_limiter_->requestAllowed(descriptors);
+  EXPECT_TRUE(res1.allowed);
+
+  // Request 2: shadow bucket exhausted (0 tokens), but enforced bucket still has tokens (1 -> 0).
+  // Request should return not allowed (so shadow stats get captured), but enforced bucket must be
+  // consumed!
+  auto res2 = rate_limiter_->requestAllowed(descriptors);
+  EXPECT_FALSE(res2.allowed);
+  EXPECT_TRUE(res2.token_bucket_context->shadowMode());
+
+  // Request 3: shadow bucket empty (0 tokens), enforced bucket empty (0 tokens).
+  // Because enforced bucket is empty, requestAllowed must report allowed = false with enforced
+  // (non-shadow) bucket!
+  auto res3 = rate_limiter_->requestAllowed(descriptors);
+  EXPECT_FALSE(res3.allowed);
+  EXPECT_FALSE(res3.token_bucket_context->shadowMode());
+}
+
+TEST_F(LocalRateLimiterDescriptorImplTest, ShadowDescriptorShortCircuitWithRuntimeGuardDisabled) {
+  TestScopedRuntime runtime;
+  runtime.mergeValues(
+      {{"envoy.reloadable_features.local_ratelimit_shadow_mode_no_short_circuit", "false"}});
+
+  static constexpr absl::string_view shadow_descriptor_yaml = R"(
+  entries:
+  - key: gate
+    value: shadow
+  token_bucket:
+    max_tokens: 1
+    tokens_per_fill: 1
+    fill_interval: 1000s
+  shadow_mode: true
+  )";
+  static constexpr absl::string_view enforced_descriptor_yaml = R"(
+  entries:
+  - key: gate
+    value: enforced
+  token_bucket:
+    max_tokens: 2
+    tokens_per_fill: 2
+    fill_interval: 100s
+  )";
+
+  TestUtility::loadFromYaml(std::string(shadow_descriptor_yaml), *descriptors_.Add());
+  TestUtility::loadFromYaml(std::string(enforced_descriptor_yaml), *descriptors_.Add());
+  initializeWithAtomicTokenBucketDescriptor(std::chrono::milliseconds(100000), 1000, 1000);
+
+  std::vector<RateLimit::Descriptor> descriptors{
+      {{{"gate", "shadow"}}},
+      {{{"gate", "enforced"}}},
+  };
+
+  // Request 1: shadow (1 -> 0), enforced (2 -> 1). Allowed.
+  auto res1 = rate_limiter_->requestAllowed(descriptors);
+  EXPECT_TRUE(res1.allowed);
+
+  // Request 2 and 3: the exhausted shadow descriptor short-circuits the evaluation, so the
+  // enforced descriptor is never consumed and the shadow bucket is always returned.
+  for (int i = 0; i < 2; i++) {
+    auto res = rate_limiter_->requestAllowed(descriptors);
+    EXPECT_FALSE(res.allowed);
+    EXPECT_TRUE(res.token_bucket_context->shadowMode());
+  }
 }
 
 } // Namespace LocalRateLimit

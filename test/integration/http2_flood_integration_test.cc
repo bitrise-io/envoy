@@ -293,14 +293,7 @@ Http2FloodMitigationTest::prefillOutboundUpstreamQueue(uint32_t frame_count) {
   return response;
 }
 
-void Http2FloodMitigationTest::triggerListenerDrain() {
-  absl::Notification drain_sequence_started;
-  test_server_->server().dispatcher().post([this, &drain_sequence_started]() {
-    test_server_->drainManager().startDrainSequence(Network::DrainDirection::All, [] {});
-    drain_sequence_started.Notify();
-  });
-  drain_sequence_started.WaitForNotification();
-}
+void Http2FloodMitigationTest::triggerListenerDrain() { startServerDrain(); }
 
 TEST_P(Http2FloodMitigationTest, Ping) {
   setNetworkConnectionBufferSize();
@@ -764,6 +757,11 @@ TEST_P(Http2FloodMitigationTest, DownstreamConnectionDurationTimeoutTriggersFloo
 // Verify detection of frame flood when sending GOAWAY frame during processing of response headers
 // on a draining listener.
 TEST_P(Http2FloodMitigationTest, GoawayOverflowDuringResponseWhenDraining) {
+  // The test needs the next response to drain-close the connection. Under the default gradual
+  // strategy the drain-close probability ramps from zero over the drain window, so ask for an
+  // immediate drain instead of racing the ramp.
+  drain_strategy_ = Server::DrainStrategy::Immediate;
+
   // pre-fill one away from overflow
   prefillOutboundDownstreamQueue(AllFrameFloodLimit - 1);
 
@@ -805,6 +803,10 @@ typed_config:
         auto size = hcm.http_filters_size();
         hcm.mutable_http_filters()->SwapElements(size - 2, size - 1);
       });
+
+  // As in GoawayOverflowDuringResponseWhenDraining, drain immediately so that the next response
+  // reliably drain-closes the connection.
+  drain_strategy_ = Server::DrainStrategy::Immediate;
 
   // pre-fill one away from overflow
   prefillOutboundDownstreamQueue(AllFrameFloodLimit - 1);
@@ -1026,6 +1028,160 @@ TEST_P(Http2FloodMitigationTest, PriorityClosedStream) {
               "http2.inbound_priority_frames_flood",
               Http2::Utility::OptionsLimits::DEFAULT_MAX_INBOUND_PRIORITY_FRAMES_PER_STREAM * 2 +
                   1);
+}
+
+TEST_P(Http2FloodMitigationTest, PriorityFloodBypassAttempt) {
+  autonomous_upstream_ = true;
+  beginSession();
+
+  const uint32_t num_streams = 10;
+
+  // Open and close multiple streams to inflate opened_streams_ counter.
+  for (uint32_t i = 0; i < num_streams; ++i) {
+    const uint32_t stream_id = Http2Frame::makeClientStreamId(i);
+    sendFrame(Http2Frame::makeRequest(
+        stream_id, "host", "/",
+        {Http2Frame::Header("response_data_blocks", "0"), Http2Frame::Header("no_trailers", "1")}));
+    // Read response to close the stream.
+    auto frame = readFrame();
+    EXPECT_EQ(Http2Frame::Type::Headers, frame.type());
+    EXPECT_TRUE(frame.endStream());
+  }
+
+  // opened_streams_ is 10
+  // This test confirms that a PRIORITY flood is detected when detection is based on
+  // active_streams instead of opened_streams.
+
+  uint32_t num_priority_frames = 500;
+  Http2Frame priority_frame = Http2Frame::makePriorityFrame(Http2Frame::makeClientStreamId(0),
+                                                            Http2Frame::makeClientStreamId(1));
+  auto buf = serializeFrames(priority_frame, num_priority_frames);
+
+  ASSERT_TRUE(tcp_client_->write({buf.begin(), buf.end()}, false, false));
+
+  tcp_client_->waitForDisconnect();
+
+  // Verify that the flood is correctly detected.
+  EXPECT_EQ(1, test_server_->counter("http2.inbound_priority_frames_flood")->value());
+}
+
+TEST_P(Http2FloodMitigationTest, PriorityFloodRollbackVerified) {
+  config_helper_.addRuntimeOverride(
+      "envoy.reloadable_features.http2_flood_protection_active_streams", "false");
+  autonomous_upstream_ = true;
+  beginSession();
+
+  const uint32_t num_streams = 10;
+
+  // Open and close multiple streams to inflate opened_streams_ counter.
+  for (uint32_t i = 0; i < num_streams; ++i) {
+    const uint32_t stream_id = Http2Frame::makeClientStreamId(i);
+    sendFrame(Http2Frame::makeRequest(
+        stream_id, "host", "/",
+        {Http2Frame::Header("response_data_blocks", "0"), Http2Frame::Header("no_trailers", "1")}));
+    // Read response to close the stream.
+    auto frame = readFrame();
+    EXPECT_EQ(Http2Frame::Type::Headers, frame.type());
+    EXPECT_TRUE(frame.endStream());
+  }
+
+  // With the guard OFF, the limit is based on cumulative opened_streams (10).
+  // Allowance: 100 * (1 + 10) = 1100.
+  // We send 500 frames; they should be ACCEPTED.
+
+  uint32_t num_priority_frames = 500;
+  Http2Frame priority_frame = Http2Frame::makePriorityFrame(Http2Frame::makeClientStreamId(0),
+                                                            Http2Frame::makeClientStreamId(1));
+  auto buf = serializeFrames(priority_frame, num_priority_frames);
+
+  ASSERT_TRUE(tcp_client_->write({buf.begin(), buf.end()}, false, false));
+
+  // The connection should stay open.
+  const uint32_t final_stream_id = Http2Frame::makeClientStreamId(num_streams);
+  sendFrame(Http2Frame::makeRequest(final_stream_id, "host", "/"));
+  auto frame2 = readFrame();
+  EXPECT_EQ(Http2Frame::Type::Headers, frame2.type());
+
+  EXPECT_TRUE(tcp_client_->connected());
+
+  // Verify that no flood was detected.
+  EXPECT_EQ(0, test_server_->counter("http2.inbound_priority_frames_flood")->value());
+}
+
+TEST_P(Http2FloodMitigationTest, WindowUpdateFloodBypassAttempt) {
+  autonomous_upstream_ = true;
+  beginSession();
+
+  const uint32_t num_streams = 10;
+
+  // Open and close multiple streams to inflate opened_streams_ counter.
+  for (uint32_t i = 0; i < num_streams; ++i) {
+    const uint32_t stream_id = Http2Frame::makeClientStreamId(i);
+    sendFrame(Http2Frame::makeRequest(
+        stream_id, "host", "/",
+        {Http2Frame::Header("response_data_blocks", "0"), Http2Frame::Header("no_trailers", "1")}));
+    // Read response to close the stream.
+    auto frame = readFrame();
+    EXPECT_EQ(Http2Frame::Type::Headers, frame.type());
+    EXPECT_TRUE(frame.endStream());
+  }
+
+  // opened_streams_ is 10, but active_streams_ is 0.
+  // Allowance: 5 + 2 * (0 + 10 * 0) = 5.
+  // We send 10 frames; they should trigger flood protection.
+
+  uint32_t num_window_update_frames = 10;
+  Http2Frame window_update_frame = Http2Frame::makeWindowUpdateFrame(0, 1);
+  auto buf = serializeFrames(window_update_frame, num_window_update_frames);
+
+  ASSERT_TRUE(tcp_client_->write({buf.begin(), buf.end()}, false, false));
+
+  tcp_client_->waitForDisconnect();
+
+  // Verify that the flood is correctly detected.
+  EXPECT_EQ(1, test_server_->counter("http2.inbound_window_update_frames_flood")->value());
+}
+
+TEST_P(Http2FloodMitigationTest, WindowUpdateFloodRollbackVerified) {
+  config_helper_.addRuntimeOverride(
+      "envoy.reloadable_features.http2_flood_protection_active_streams", "false");
+  autonomous_upstream_ = true;
+  beginSession();
+
+  const uint32_t num_streams = 10;
+
+  // Open and close multiple streams to inflate opened_streams_ counter.
+  for (uint32_t i = 0; i < num_streams; ++i) {
+    const uint32_t stream_id = Http2Frame::makeClientStreamId(i);
+    sendFrame(Http2Frame::makeRequest(
+        stream_id, "host", "/",
+        {Http2Frame::Header("response_data_blocks", "0"), Http2Frame::Header("no_trailers", "1")}));
+    // Read response to close the stream.
+    auto frame = readFrame();
+    EXPECT_EQ(Http2Frame::Type::Headers, frame.type());
+    EXPECT_TRUE(frame.endStream());
+  }
+
+  // With the guard OFF, the limit is based on cumulative opened_streams (10).
+  // Allowance: 5 + 2 * (10 + 10 * 0) = 25.
+  // We send 10 frames; they should be ACCEPTED.
+
+  uint32_t num_window_update_frames = 10;
+  Http2Frame window_update_frame = Http2Frame::makeWindowUpdateFrame(0, 1);
+  auto buf = serializeFrames(window_update_frame, num_window_update_frames);
+
+  ASSERT_TRUE(tcp_client_->write({buf.begin(), buf.end()}, false, false));
+
+  // The connection should stay open.
+  const uint32_t final_stream_id = Http2Frame::makeClientStreamId(num_streams);
+  sendFrame(Http2Frame::makeRequest(final_stream_id, "host", "/"));
+  auto frame2 = readFrame();
+  EXPECT_EQ(Http2Frame::Type::Headers, frame2.type());
+
+  EXPECT_TRUE(tcp_client_->connected());
+
+  // Verify that no flood was detected.
+  EXPECT_EQ(0, test_server_->counter("http2.inbound_window_update_frames_flood")->value());
 }
 
 TEST_P(Http2FloodMitigationTest, WindowUpdate) {

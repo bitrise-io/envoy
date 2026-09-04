@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "envoy/network/transport_socket.h"
+#include "envoy/singleton/instance.h"
 #include "envoy/ssl/context.h"
 #include "envoy/ssl/context_config.h"
 #include "envoy/ssl/private_key/private_key.h"
@@ -32,7 +33,7 @@
 #endif
 
 namespace Envoy {
-#if !defined OPENSSL_IS_BORINGSSL && !defined OPENSSL_IS_AWSLC
+#ifndef OPENSSL_IS_BORINGSSL
 #error Envoy requires BoringSSL
 #endif
 
@@ -79,6 +80,30 @@ namespace Extensions {
 namespace TransportSockets {
 namespace Tls {
 
+// The TLS stat name builtins (BoringSSL cipher/curve/signature algorithm/version names, plus the
+// fixed prefixes and "unknown" fallbacks) are identical for every TLS context. Interning
+// them into a per-context StatNameSet duplicated ~150 locked symbol-table encodes and a
+// builtin map per context, and repeated it on every SDS certificate rotation. Instead we
+// build the set once per server and share it via the singleton manager. The set is fully
+// populated at construction and immutable thereafter, so the lock-free getBuiltin() reads
+// performed on worker threads remain safe.
+class TlsBuiltinStatNames : public Singleton::Instance {
+public:
+  explicit TlsBuiltinStatNames(Stats::SymbolTable& symbol_table);
+
+  Stats::StatNameSet& statNameSet() const { return *stat_name_set_; }
+
+  const Stats::StatNameSetPtr stat_name_set_;
+  const Stats::StatName unknown_ssl_cipher_;
+  const Stats::StatName unknown_ssl_curve_;
+  const Stats::StatName unknown_ssl_algorithm_;
+  const Stats::StatName unknown_ssl_version_;
+  const Stats::StatName ssl_ciphers_;
+  const Stats::StatName ssl_versions_;
+  const Stats::StatName ssl_curves_;
+  const Stats::StatName ssl_sigalgs_;
+};
+
 class ContextImpl : public virtual Envoy::Ssl::Context,
                     protected Logger::Loggable<Logger::Id::config> {
 public:
@@ -102,10 +127,10 @@ public:
 
   static int sslSocketIndex();
   // Ssl::Context
-  absl::optional<uint32_t> daysUntilFirstCertExpires() const override;
+  std::optional<uint32_t> daysUntilFirstCertExpires() const override;
   Envoy::Ssl::CertificateDetailsPtr getCaCertInformation() const override;
   std::vector<Envoy::Ssl::CertificateDetailsPtr> getCertChainInformation() const override;
-  absl::optional<uint64_t> secondsUntilFirstOcspResponseExpires() const override;
+  std::optional<uint64_t> secondsUntilFirstOcspResponseExpires() const override;
 
   std::vector<Ssl::PrivateKeyMethodProviderSharedPtr> getPrivateKeyMethodProviders();
 
@@ -117,6 +142,13 @@ public:
       const std::string& host_name);
 
   static void keylogCallback(const SSL* ssl, const char* line);
+
+  // Apply the configured local/remote IP-list filters and, if they match,
+  // write a single NSS Key Log line. Shared by the TCP TLS key log callback
+  // and by the QUIC TLS key log callback in EnvoyTlsServerHandshaker. The
+  // call is a no-op when no key log file has been opened.
+  void maybeWriteKeyLog(const char* line, const Network::Address::Instance* local_addr,
+                        const Network::Address::Instance* remote_addr) const;
 
 protected:
   friend class ContextImplPeer;
@@ -150,6 +182,8 @@ protected:
 
   void populateServerNamesMap(Ssl::TlsContext& ctx, const int pkey_id);
 
+  absl::Status setCompliancePolicy(enum ssl_compliance_policy_t policy);
+
   // This is always non-empty, with the first context used for all new SSL
   // objects. For server contexts, once we have ClientHello, we
   // potentially switch to a different CertificateContext based on certificate
@@ -163,15 +197,8 @@ protected:
   std::string cert_chain_file_path_;
   Server::Configuration::CommonFactoryContext& factory_context_;
   const unsigned tls_max_version_;
-  mutable Stats::StatNameSetPtr stat_name_set_;
-  const Stats::StatName unknown_ssl_cipher_;
-  const Stats::StatName unknown_ssl_curve_;
-  const Stats::StatName unknown_ssl_algorithm_;
-  const Stats::StatName unknown_ssl_version_;
-  const Stats::StatName ssl_ciphers_;
-  const Stats::StatName ssl_versions_;
-  const Stats::StatName ssl_curves_;
-  const Stats::StatName ssl_sigalgs_;
+  // Server-wide shared TLS stat name builtins, kept alive for this context's lifetime.
+  const std::shared_ptr<TlsBuiltinStatNames> builtin_stat_names_;
   const Ssl::HandshakerCapabilities capabilities_;
   const Network::Address::IpList tls_keylog_local_;
   const Network::Address::IpList tls_keylog_remote_;

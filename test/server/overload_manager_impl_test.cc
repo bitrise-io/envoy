@@ -52,7 +52,7 @@ public:
 
   void setPressure(double pressure) { response_ = pressure; }
 
-  void setError() { response_ = EnvoyException("fake_error"); }
+  void setError() { response_ = absl::InternalError("fake_error"); }
 
   void setUpdateAsync(bool new_update_async) {
     callbacks_.reset();
@@ -82,15 +82,15 @@ private:
       usage.resource_pressure_ = absl::get<double>(response_);
       dispatcher_.post([&, usage]() { callbacks.onSuccess(usage); });
     } else {
-      EnvoyException& error = absl::get<EnvoyException>(response_);
+      absl::Status& error = absl::get<absl::Status>(response_);
       dispatcher_.post([&, error]() { callbacks.onFailure(error); });
     }
   }
 
   Event::Dispatcher& dispatcher_;
-  absl::variant<double, EnvoyException> response_;
+  absl::variant<double, absl::Status> response_;
   bool update_async_ = false;
-  absl::optional<std::reference_wrapper<ResourceUpdateCallbacks>> callbacks_;
+  std::optional<std::reference_wrapper<ResourceUpdateCallbacks>> callbacks_;
 };
 
 class FakeProactiveResourceMonitor : public ProactiveResourceMonitor {
@@ -130,7 +130,7 @@ class FakeResourceMonitorFactory : public Server::Configuration::ResourceMonitor
 public:
   FakeResourceMonitorFactory(const std::string& name) : name_(name) {}
 
-  Server::ResourceMonitorPtr
+  absl::StatusOr<Server::ResourceMonitorPtr>
   createResourceMonitor(const Protobuf::Message&,
                         Server::Configuration::ResourceMonitorFactoryContext& context) override {
     auto monitor = std::make_unique<FakeResourceMonitor>(context.mainThreadDispatcher());
@@ -1006,7 +1006,7 @@ TEST_F(OverloadManagerImplTest, ProactiveResourceAllocateAndDeallocateResourceTe
 
   auto monitor = manager->getThreadLocalOverloadState().getProactiveResourceMonitorForTest(
       Server::OverloadProactiveResourceName::GlobalDownstreamMaxConnections);
-  EXPECT_NE(absl::nullopt, monitor);
+  EXPECT_NE(std::nullopt, monitor);
   EXPECT_EQ(1, monitor->currentResourceUsage());
   resource_allocated = manager->getThreadLocalOverloadState().tryAllocateResource(
       Server::OverloadProactiveResourceName::GlobalDownstreamMaxConnections, 3);

@@ -18,8 +18,10 @@
 #include "test/mocks/api/mocks.h"
 #include "test/mocks/event/mocks.h"
 #include "test/mocks/server/factory_context.h"
+#include "test/mocks/server/instance.h"
 #include "test/mocks/thread_local/mocks.h"
 #include "test/mocks/upstream/mocks.h"
+#include "test/test_common/logging.h"
 #include "test/test_common/threadsafe_singleton_injector.h"
 
 #include "gmock/gmock.h"
@@ -32,6 +34,10 @@ using testing::NiceMock;
 using testing::Return;
 using testing::ReturnRef;
 using testing::StrictMock;
+
+using testing::Contains;
+using testing::Key;
+using testing::UnorderedElementsAre;
 
 namespace Envoy {
 namespace Extensions {
@@ -52,6 +58,12 @@ protected:
     EXPECT_CALL(context_, threadLocal()).WillRepeatedly(ReturnRef(thread_local_));
     EXPECT_CALL(context_, scope()).WillRepeatedly(ReturnRef(*stats_scope_));
     EXPECT_CALL(context_, clusterManager()).WillRepeatedly(ReturnRef(cluster_manager_));
+
+    // Make the jittered reconnect backoff deterministic in tests. The backoff is the deterministic
+    // exponential schedule (1s, 2s, 4s, ...) plus addJitter()'s upward jitter of random() % (15% of
+    // the interval). With a fixed random of 3999 the jitter is reproducible, e.g. the first three
+    // failures yield 1099/2099/4399ms (1000+99, 2000+99, 4000+399).
+    ON_CALL(context_.api_.random_, random()).WillByDefault(Return(3999));
 
     // Create the socket interface.
     socket_interface_ = std::make_unique<ReverseTunnelInitiator>(context_);
@@ -220,6 +232,22 @@ protected:
     io_handle_->trackConnectionFailure(host_address, cluster_name);
   }
 
+  void trackConnectionFailureWithRetryAfter(const std::string& host_address,
+                                            const std::string& cluster_name,
+                                            std::chrono::milliseconds retry_after) {
+    io_handle_->trackConnectionFailure(host_address, cluster_name, retry_after);
+  }
+
+  // Returns the backoff window (backoff_until - last_failure_time) in ms for a host. Both stamps
+  // come from the same trackConnectionFailure() call, so this is the exact delay, free of
+  // wall-clock drift.
+  int64_t getBackoffDelayMs(const std::string& host_address) const {
+    const auto& info = getHostConnectionInfo(host_address);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(info.backoff_until -
+                                                                 info.last_failure_time)
+        .count();
+  }
+
   void resetHostBackoff(const std::string& host_address) {
     io_handle_->resetHostBackoff(host_address);
   }
@@ -296,6 +324,9 @@ protected:
   std::unique_ptr<NiceMock<Network::MockClientConnection>> getDeletableConn() {
     auto mock_connection = std::make_unique<NiceMock<Network::MockClientConnection>>();
     EXPECT_CALL(*mock_connection, dispatcher()).WillRepeatedly(ReturnRef(dispatcher_));
+    // shutdown() calls getSocket() before close(); the mock has no default for a reference return.
+    static Network::ConnectionSocketPtr empty_socket;
+    EXPECT_CALL(*mock_connection, getSocket()).WillRepeatedly(ReturnRef(empty_socket));
 
     return mock_connection;
   }
@@ -336,6 +367,12 @@ protected:
   // Helper to access private members for testing.
   void addWrapperToHostMap(RCConnectionWrapper* wrapper, const std::string& host_address) {
     io_handle_->conn_wrapper_to_host_map_[wrapper] = host_address;
+  }
+
+  // Transfer ownership of a wrapper into the io handle so onConnectionDone() can find and remove
+  // it.
+  void pushConnectionWrapper(std::unique_ptr<RCConnectionWrapper> wrapper) {
+    io_handle_->connection_wrappers_.push_back(std::move(wrapper));
   }
 
   void cleanup() { io_handle_->cleanup(); }
@@ -667,9 +704,7 @@ TEST_F(ReverseConnectionIOHandleTest, MaybeUpdateHostsMappingsValidHosts) {
 
   // Verify that hosts were added to the mapping.
   const auto& host_to_conn_info_map = getHostToConnInfoMap();
-  EXPECT_EQ(host_to_conn_info_map.size(), 2);
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.1"), host_to_conn_info_map.end());
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.2"), host_to_conn_info_map.end());
+  EXPECT_THAT(host_to_conn_info_map, UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.2")));
 }
 
 // Test maybeUpdateHostsMappingsAndConnections with no new hosts.
@@ -709,10 +744,8 @@ TEST_F(ReverseConnectionIOHandleTest, MaybeUpdateHostsMappingsNoNewHosts) {
 
   // Verify that all three host entries exist after maintainClusterConnections.
   const auto& host_to_conn_info_map = getHostToConnInfoMap();
-  EXPECT_EQ(host_to_conn_info_map.size(), 3);
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.1"), host_to_conn_info_map.end());
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.2"), host_to_conn_info_map.end());
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.3"), host_to_conn_info_map.end());
+  EXPECT_THAT(host_to_conn_info_map,
+              UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.2"), Key("192.168.1.3")));
 
   // Now test partial host removal by calling maybeUpdateHostsMappingsAndConnections with fewer.
   // hosts
@@ -721,11 +754,8 @@ TEST_F(ReverseConnectionIOHandleTest, MaybeUpdateHostsMappingsNoNewHosts) {
 
   // Verify that the removed host was cleaned up but others remain.
   const auto& updated_host_to_conn_info_map = getHostToConnInfoMap();
-  EXPECT_EQ(updated_host_to_conn_info_map.size(), 2);
-  EXPECT_NE(updated_host_to_conn_info_map.find("192.168.1.1"), updated_host_to_conn_info_map.end());
-  EXPECT_EQ(updated_host_to_conn_info_map.find("192.168.1.2"),
-            updated_host_to_conn_info_map.end()); // Should be removed
-  EXPECT_NE(updated_host_to_conn_info_map.find("192.168.1.3"), updated_host_to_conn_info_map.end());
+  EXPECT_THAT(updated_host_to_conn_info_map,
+              UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.3")));
 }
 
 // Test shouldAttemptConnectionToHost with valid host and no existing connections.
@@ -930,7 +960,9 @@ TEST_F(ReverseConnectionIOHandleTest, ResetHostBackoffReturnsIfHostNotFound) {
   EXPECT_EQ(stat_map["test_scope.reverse_connections.host.non-existent-host.recovered"], 0);
 }
 
-// Test trackConnectionFailure exponential backoff.
+// Test trackConnectionFailure deterministic exponential backoff with upward jitter. The schedule is
+// base * 2^(failure_count-1) (1s, 2s, 4s, ...) plus addJitter()'s random() % (15% of the interval).
+// With the fixture's fixed random of 3999 the jitter is exactly 1000+99/2000+99/4000+399ms.
 TEST_F(ReverseConnectionIOHandleTest, TrackConnectionFailureExponentialBackoff) {
   // Set up thread local slot first so stats can be properly tracked.
   setupThreadLocalSlot();
@@ -964,45 +996,99 @@ TEST_F(ReverseConnectionIOHandleTest, TrackConnectionFailureExponentialBackoff) 
   const auto& host_info_initial = getHostConnectionInfo("192.168.1.1");
   EXPECT_EQ(host_info_initial.failure_count, 0);
 
-  // First failure - should have 1 second backoff (1000ms)
+  // getBackoffDelayMs() measures backoff_until - last_failure_time, the exact delay free of
+  // wall-clock slop, so the deterministic+jitter values can be asserted precisely.
+  // Failure 1: 1000 (base) + 3999 % 150  = 1000 + 99  = 1099ms.
   trackConnectionFailure("192.168.1.1", "test-cluster");
-  const auto& host_info_1 = getHostConnectionInfo("192.168.1.1");
-  EXPECT_EQ(host_info_1.failure_count, 1);
-  // Verify backoff_until is set to a future time (approximately current_time + 1000ms)
-  auto backoff_duration_1 =
-      host_info_1.backoff_until - std::chrono::steady_clock::now(); // NO_CHECK_FORMAT(real_time)
-  // backoff_delay_ms = 1000 * 2^(1-1) = 1000 * 2^0 = 1000 * 1 = 1000ms
-  auto backoff_ms_1 =
-      std::chrono::duration_cast<std::chrono::milliseconds>(backoff_duration_1).count();
-  EXPECT_GE(backoff_ms_1, 900);  // Should be at least 900ms (allowing for small timing variations)
-  EXPECT_LE(backoff_ms_1, 1100); // Should be at most 1100ms
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 1);
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 1099);
 
-  // Second failure - should have 2 second backoff (2000ms)
+  // Failure 2: 2000 + 3999 % 300 = 2000 + 99 = 2099ms.
   trackConnectionFailure("192.168.1.1", "test-cluster");
-  const auto& host_info_2 = getHostConnectionInfo("192.168.1.1");
-  EXPECT_EQ(host_info_2.failure_count, 2);
-  // backoff_delay_ms = 1000 * 2^(2-1) = 1000 * 2^1 = 1000 * 2 = 2000ms
-  auto backoff_duration_2 =
-      host_info_2.backoff_until - std::chrono::steady_clock::now(); // NO_CHECK_FORMAT(real_time)
-  auto backoff_ms_2 =
-      std::chrono::duration_cast<std::chrono::milliseconds>(backoff_duration_2).count();
-  EXPECT_GE(backoff_ms_2, 1900); // Should be at least 1900ms
-  EXPECT_LE(backoff_ms_2, 2100); // Should be at most 2100ms
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 2);
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 2099);
 
-  // Third failure - should have 4 second backoff (4000ms)
+  // Failure 3: 4000 + 3999 % 600 = 4000 + 399 = 4399ms.
   trackConnectionFailure("192.168.1.1", "test-cluster");
-  const auto& host_info_3 = getHostConnectionInfo("192.168.1.1");
-  EXPECT_EQ(host_info_3.failure_count, 3);
-  // backoff_delay_ms = 1000 * 2^(3-1) = 1000 * 2^2 = 1000 * 4 = 4000ms
-  auto backoff_duration_3 =
-      host_info_3.backoff_until - std::chrono::steady_clock::now(); // NO_CHECK_FORMAT(real_time)
-  auto backoff_ms_3 =
-      std::chrono::duration_cast<std::chrono::milliseconds>(backoff_duration_3).count();
-  EXPECT_GE(backoff_ms_3, 3900); // Should be at least 3900ms
-  EXPECT_LE(backoff_ms_3, 4100); // Should be at most 4100ms
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 3);
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 4399);
 
   // Verify that shouldAttemptConnectionToHost returns false during backoff.
   EXPECT_FALSE(shouldAttemptConnectionToHost("192.168.1.1", "test-cluster"));
+}
+
+// Test that a server Retry-After hint is honored as the per-host backoff: bounded by the configured
+// max (default 30s) and then jittered upward like every other reconnect delay.
+TEST_F(ReverseConnectionIOHandleTest, TrackConnectionFailureHonorsRetryAfter) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  // A 7s hint is below the cap, so it is used as-is then jittered: 7000 + 3999 % 1050 = 7000 + 849.
+  addHostConnectionInfo("192.168.1.1", "test-cluster", 1);
+  trackConnectionFailureWithRetryAfter("192.168.1.1", "test-cluster",
+                                       std::chrono::milliseconds(7000));
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 7849);
+  EXPECT_FALSE(shouldAttemptConnectionToHost("192.168.1.1", "test-cluster"));
+
+  // A 20-minute hint is first clamped to the 30s max, then jittered: 30000 + 3999 % 4500 = 33999.
+  // (Jitter is intentionally applied after the cap and not re-capped, so a small overshoot is
+  // expected.)
+  addHostConnectionInfo("192.168.1.2", "test-cluster", 1);
+  trackConnectionFailureWithRetryAfter("192.168.1.2", "test-cluster",
+                                       std::chrono::milliseconds(1200000));
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.2"), 33999);
+}
+
+// Test that max_reconnect_backoff caps the exponential schedule. With a 5s cap, the schedule
+// saturates at 5000ms (then jittered) instead of continuing to 8s/16s/etc.
+TEST_F(ReverseConnectionIOHandleTest, TrackConnectionFailureRespectsConfiguredMaxBackoff) {
+  // Rebuild the extension with a 5s max_reconnect_backoff, then wire its thread-local slot (the IO
+  // handle reads the time source through the extension's slot, so it must be set on this instance).
+  config_.mutable_max_reconnect_backoff()->set_seconds(5);
+  extension_ = std::make_unique<ReverseTunnelInitiatorExtension>(context_, config_);
+  setupThreadLocalSlot();
+  EXPECT_EQ(extension_->maxReconnectBackoffMs(), 5000);
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config); // Uses the rebuilt extension_.
+  ASSERT_NE(io_handle_, nullptr);
+
+  // Drive 4 failures. The deterministic step on the 4th failure would be 1000 * 2^3 = 8000ms, but
+  // it is capped at the configured 5000ms and then jittered: 5000 + 3999 % 750 = 5000 + 249 =
+  // 5249ms.
+  addHostConnectionInfo("192.168.1.1", "test-cluster", 1);
+  for (int i = 0; i < 4; ++i) {
+    trackConnectionFailure("192.168.1.1", "test-cluster");
+  }
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 4);
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 5249);
+}
+
+// Test that resetHostBackoff clears failure_count so the next failure restarts at the base
+// interval.
+TEST_F(ReverseConnectionIOHandleTest, ResetHostBackoffRestartsScheduleAtBase) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  // Escalate (failure_count starts at 0), then reset.
+  addHostConnectionInfo("192.168.1.1", "test-cluster", 1);
+  trackConnectionFailure("192.168.1.1", "test-cluster"); // failure_count 0 -> 1
+  trackConnectionFailure("192.168.1.1", "test-cluster"); // failure_count 1 -> 2
+  trackConnectionFailure("192.168.1.1", "test-cluster"); // failure_count 2 -> 3
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 3);
+  resetHostBackoff("192.168.1.1");
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 0);
+
+  // The next failure starts from the base interval again (1000 + jitter), not an escalated value.
+  trackConnectionFailure("192.168.1.1", "test-cluster");
+  EXPECT_EQ(getHostConnectionInfo("192.168.1.1").failure_count, 1);
+  EXPECT_EQ(getBackoffDelayMs("192.168.1.1"), 1099);
 }
 
 // Test host mapping and backoff integration.
@@ -1064,13 +1150,9 @@ TEST_F(ReverseConnectionIOHandleTest, HostMappingAndBackoffIntegration) {
 
   // Verify all hosts exist initially.
   const auto& host_to_conn_info_map_initial = getHostToConnInfoMap();
-  EXPECT_EQ(host_to_conn_info_map_initial.size(),
-            5); // 192.168.1.1, 192.168.1.2, 192.168.1.3, 192.168.2.1, 192.168.2.2
-  EXPECT_NE(host_to_conn_info_map_initial.find("192.168.1.1"), host_to_conn_info_map_initial.end());
-  EXPECT_NE(host_to_conn_info_map_initial.find("192.168.1.2"), host_to_conn_info_map_initial.end());
-  EXPECT_NE(host_to_conn_info_map_initial.find("192.168.1.3"), host_to_conn_info_map_initial.end());
-  EXPECT_NE(host_to_conn_info_map_initial.find("192.168.2.1"), host_to_conn_info_map_initial.end());
-  EXPECT_NE(host_to_conn_info_map_initial.find("192.168.2.2"), host_to_conn_info_map_initial.end());
+  EXPECT_THAT(host_to_conn_info_map_initial,
+              UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.2"), Key("192.168.1.3"),
+                                   Key("192.168.2.1"), Key("192.168.2.2")));
 
   // Step 3: Put some hosts in backoff.
   trackConnectionFailure("192.168.1.1", "cluster-A"); // 192.168.1.1 in backoff
@@ -1587,10 +1669,7 @@ TEST_F(ReverseConnectionIOHandleTest, InitiateMultipleConnectionsMixedResults) {
   for (const auto& [wrapper, host] : wrapper_to_host_map) {
     mapped_hosts.insert(host);
   }
-  EXPECT_EQ(mapped_hosts.size(), 2);                               // Should have 2 successful hosts
-  EXPECT_NE(mapped_hosts.find("192.168.1.1"), mapped_hosts.end()); // Success
-  EXPECT_EQ(mapped_hosts.find("192.168.1.2"), mapped_hosts.end()); // Failed - not in map
-  EXPECT_NE(mapped_hosts.find("192.168.1.3"), mapped_hosts.end()); // Success
+  EXPECT_THAT(mapped_hosts, UnorderedElementsAre("192.168.1.1", "192.168.1.3"));
 }
 
 // Test removeStaleHostAndCloseConnections removes host and closes connections.
@@ -1665,9 +1744,7 @@ TEST_F(ReverseConnectionIOHandleTest, RemoveStaleHostAndCloseConnections) {
   maintainClusterConnections("test-cluster", cluster_config);
 
   // Verify both hosts are initially present.
-  EXPECT_EQ(getHostToConnInfoMap().size(), 2);
-  EXPECT_NE(getHostToConnInfoMap().find("192.168.1.1"), getHostToConnInfoMap().end());
-  EXPECT_NE(getHostToConnInfoMap().find("192.168.1.2"), getHostToConnInfoMap().end());
+  EXPECT_THAT(getHostToConnInfoMap(), UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.2")));
 
   // Verify that connection wrappers were created by maintainClusterConnections.
   const auto& connection_wrappers = getConnectionWrappers();
@@ -1679,11 +1756,9 @@ TEST_F(ReverseConnectionIOHandleTest, RemoveStaleHostAndCloseConnections) {
 
   // Verify that host 192.168.1.1 is still in host_to_conn_info_map_
   // (removeStaleHostAndCloseConnections doesn't remove it)
-  EXPECT_EQ(getHostToConnInfoMap().size(), 2);
-  EXPECT_NE(getHostToConnInfoMap().find("192.168.1.1"), getHostToConnInfoMap().end());
-  EXPECT_NE(getHostToConnInfoMap().find("192.168.1.2"), getHostToConnInfoMap().end());
+  EXPECT_THAT(getHostToConnInfoMap(), UnorderedElementsAre(Key("192.168.1.1"), Key("192.168.1.2")));
 
-  // Verify that connection wrappers for the removed host are removed.
+  // Tracking drops immediately; the wrapper is deferred-deleted.
   EXPECT_EQ(getConnectionWrappers().size(), 1);   // Only host 192.168.1.2's wrapper remains
   EXPECT_EQ(getConnWrapperToHostMap().size(), 1); // Only host 192.168.1.2's mapping remains
 
@@ -1691,6 +1766,9 @@ TEST_F(ReverseConnectionIOHandleTest, RemoveStaleHostAndCloseConnections) {
   const auto& wrapper_to_host_map = getConnWrapperToHostMap();
   EXPECT_EQ(wrapper_to_host_map.size(), 1);
   EXPECT_EQ(wrapper_to_host_map.begin()->second, "192.168.1.2"); // Only 192.168.1.2 should remain
+
+  // Drain deferred deletes so the removed wrapper is destroyed without leaking into TearDown.
+  dispatcher_.clearDeferredDeleteList();
 }
 
 // Test read() method - should delegate to base class.
@@ -1703,7 +1781,7 @@ TEST_F(ReverseConnectionIOHandleTest, ReadMethod) {
   Buffer::OwnedImpl buffer;
 
   // Call read() - should delegate to base class implementation.
-  auto result = io_handle_->read(buffer, absl::optional<uint64_t>(100));
+  auto result = io_handle_->read(buffer, std::optional<uint64_t>(100));
 
   // Should return a valid result.
   EXPECT_NE(result.err_, nullptr);
@@ -2160,8 +2238,7 @@ TEST_F(ReverseConnectionIOHandleTest, OnConnectionDoneFailureAndRecovery) {
 
   // Verify host info is still present (should not be removed)
   const auto& host_to_conn_info_map = getHostToConnInfoMap();
-  EXPECT_EQ(host_to_conn_info_map.size(), 1);
-  EXPECT_NE(host_to_conn_info_map.find("192.168.1.1"), host_to_conn_info_map.end());
+  EXPECT_THAT(host_to_conn_info_map, UnorderedElementsAre(Key("192.168.1.1")));
 }
 
 // Test downstream connection closure and re-initiation.
@@ -2263,12 +2340,12 @@ TEST_F(ReverseConnectionIOHandleTest, OnDownstreamConnectionClosedTriggersReInit
   }
 
   // Step 4: Simulate downstream connection closure.
-  io_handle_->onDownstreamConnectionClosed(connection_key);
+  io_handle_->onDownstreamConnectionClosed(connection_key, /*connection_id=*/12345);
 
   // Verify connection key is removed from host tracking.
   host_it = getHostToConnInfoMap().find("192.168.1.1");
   EXPECT_NE(host_it, getHostToConnInfoMap().end());
-  EXPECT_EQ(host_it->second.connection_keys.count(connection_key), 0);
+  EXPECT_FALSE(host_it->second.connection_keys.contains(connection_key));
 
   // Step 5: Set up expectation for new connection attempts.
   auto mock_connection2 = setupMockConnection();
@@ -2303,6 +2380,51 @@ TEST_F(ReverseConnectionIOHandleTest, OnDownstreamConnectionClosedTriggersReInit
   auto stat_map = extension_->getCrossWorkerStatMap();
   EXPECT_EQ(stat_map["test_scope.reverse_connections.host.192.168.1.1.connecting"], 1);
   EXPECT_EQ(stat_map["test_scope.reverse_connections.cluster.test-cluster.connecting"], 1);
+}
+
+// For a host that needs N>1 connections, the establishment episode timestamp must survive the
+// 2..N-1 handshake completions and only clear once the target connection count is reached.
+TEST_F(ReverseConnectionIOHandleTest, EpisodeInitiationTimeClearedOnlyAtTargetCount) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+  createTriggerPipe();
+
+  // Host wants two connections; simulate the first dial already having stamped the episode time.
+  addHostConnectionInfo("192.168.1.1", "test-cluster", 2);
+  getMutableHostConnectionInfo("192.168.1.1").episode_initiation_time_ms = 1000;
+
+  // Completes one handshake with a distinct local address (so it yields a distinct connection key).
+  auto complete_one_handshake = [&](uint32_t local_port) {
+    auto mock_connection = setupMockConnection();
+    auto local = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", local_port);
+    auto remote = std::make_shared<Network::Address::Ipv4Instance>("192.168.1.1", 8080);
+    auto provider = std::make_shared<Network::ConnectionInfoSetterImpl>(local, remote);
+    EXPECT_CALL(*mock_connection, connectionInfoProvider())
+        .WillRepeatedly(
+            Invoke([provider]() -> const Network::ConnectionInfoProvider& { return *provider; }));
+
+    auto host = createMockHost("192.168.1.1");
+    auto wrapper = std::make_unique<RCConnectionWrapper>(*io_handle_, std::move(mock_connection),
+                                                         host, "test-cluster");
+    RCConnectionWrapper* wrapper_ptr = wrapper.get();
+    addWrapperToHostMap(wrapper_ptr, "192.168.1.1");
+    pushConnectionWrapper(std::move(wrapper));
+    io_handle_->onConnectionDone("reverse connection accepted", wrapper_ptr, false);
+  };
+
+  // First handshake completes: still below target, timestamp must remain.
+  complete_one_handshake(11111);
+  ASSERT_EQ(getHostConnectionInfo("192.168.1.1").connection_keys.size(), 1u);
+  EXPECT_TRUE(getHostConnectionInfo("192.168.1.1").episode_initiation_time_ms.has_value());
+  EXPECT_EQ(*getHostConnectionInfo("192.168.1.1").episode_initiation_time_ms, 1000);
+
+  // Second handshake reaches the target: timestamp is cleared, ending the episode.
+  complete_one_handshake(22222);
+  ASSERT_EQ(getHostConnectionInfo("192.168.1.1").connection_keys.size(), 2u);
+  EXPECT_FALSE(getHostConnectionInfo("192.168.1.1").episode_initiation_time_ms.has_value());
 }
 
 TEST_F(ReverseConnectionIOHandleTest, SkipNewConnectionIfAttemptInProgress) {
@@ -2548,6 +2670,62 @@ TEST_F(ReverseConnectionIOHandleTest, MaintainReverseConnectionsMissingSrcNodeId
   maintainReverseConnections();
 }
 
+// While the hot-restart parent is still accepting, maintainReverseConnections() must not dial and
+// should re-arm the retry timer for a short re-check instead.
+TEST_F(ReverseConnectionIOHandleTest, MaintainReverseConnectionsDefersWhileParentAccepting) {
+  setupThreadLocalSlot();
+
+  // Give the extension a server whose hot restart reports the parent still accepting.
+  NiceMock<Server::MockInstance> server;
+  EXPECT_CALL(server.hot_restart_, parentStopAcceptingRequested()).WillRepeatedly(Return(false));
+  extension_->onServerInitialized(server);
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  EXPECT_NE(io_handle_, nullptr);
+
+  // Create the retry timer via initializeFileEvent; the initial maintenance pass must defer, so the
+  // timer is enabled with the short re-check interval and no cluster dial is attempted.
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(10), _));
+  EXPECT_CALL(cluster_manager_, getThreadLocalCluster(_)).Times(0);
+
+  Event::FileReadyCb cb = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, cb, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+}
+
+// After the drain request is sent, maintainReverseConnections() arms a fixed propagation
+// grace timer before dialing so the parent can process the RPC and stop listeners.
+TEST_F(ReverseConnectionIOHandleTest, MaintainReverseConnectionsDefersForDrainPropagationGrace) {
+  setupThreadLocalSlot();
+
+  NiceMock<Server::MockInstance> server;
+  // First maintenance pass still sees the parent accepting; after the re-check the drain
+  // request has been sent.
+  EXPECT_CALL(server.hot_restart_, parentStopAcceptingRequested())
+      .WillOnce(Return(false))
+      .WillRepeatedly(Return(true));
+  extension_->onServerInitialized(server);
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  EXPECT_NE(io_handle_, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(10), _));
+  EXPECT_CALL(cluster_manager_, getThreadLocalCluster(_)).Times(0);
+
+  Event::FileReadyCb cb = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, cb, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+
+  // Re-check after the drain request: schedule the fixed grace period, still no dial.
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(50), _));
+  mock_timer->invokeCallback();
+}
+
 // Test maintainClusterConnections early return when cluster is not found.
 TEST_F(ReverseConnectionIOHandleTest, MaintainClusterConnectionsNoCluster) {
   auto config = createDefaultTestConfig();
@@ -2569,7 +2747,7 @@ TEST_F(ReverseConnectionIOHandleTest, ShouldAttemptConnectionCreatesHostEntry) {
 
   EXPECT_TRUE(shouldAttemptConnectionToHost("10.0.0.5", "cluster-x"));
   const auto& map = getHostToConnInfoMap();
-  EXPECT_NE(map.find("10.0.0.5"), map.end());
+  EXPECT_THAT(map, Contains(Key("10.0.0.5")));
 }
 
 // Test maybeUpdateHostsMappingsAndConnections removes stale hosts.
@@ -2587,8 +2765,7 @@ TEST_F(ReverseConnectionIOHandleTest, MaybeUpdateHostsRemovesStaleHosts) {
   // Updated set: only a → b should be removed.
   maybeUpdateHostsMappingsAndConnections("c1", std::vector<std::string>{"a"});
   const auto& map = getHostToConnInfoMap();
-  EXPECT_NE(map.find("a"), map.end());
-  EXPECT_EQ(map.find("b"), map.end());
+  EXPECT_THAT(map, UnorderedElementsAre(Key("a")));
 }
 
 // Lightly exercise read/write/connect wrappers for coverage.
@@ -2600,7 +2777,7 @@ TEST_F(ReverseConnectionIOHandleTest, ReadWriteConnectCoverage) {
   Buffer::OwnedImpl buf("hello");
   (void)io_handle_->write(buf);
   Buffer::OwnedImpl rbuf;
-  (void)io_handle_->read(rbuf, absl::optional<uint64_t>(64));
+  (void)io_handle_->read(rbuf, std::optional<uint64_t>(64));
 
   auto addr = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 0);
   (void)io_handle_->connect(addr);
@@ -3230,6 +3407,202 @@ TEST_F(ReverseConnectionIOHandleTest, CloseNoDoubleCloseWithPipeFds) {
 
   io_handle_->close();
   io_handle_.reset();
+}
+
+// markTunnelDrainingAndDialReplacement() drops the draining tunnel from tracking and arms the
+// retry timer so the maintenance loop dials a replacement on the next dispatcher pass.
+TEST_F(ReverseConnectionIOHandleTest, MarkTunnelDrainingDropsKeyAndDialsReplacement) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  // Capture the retry timer created during initializeFileEvent so we can assert it is re-armed.
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  EXPECT_CALL(*mock_timer, enableTimer(_, _)).Times(testing::AnyNumber());
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+
+  // Track a host with a single live tunnel.
+  const std::string host = "192.168.1.1";
+  const std::string connection_key = "192.168.1.1:12345";
+  addHostConnectionInfo(host, "remote-cluster", 1);
+  getMutableHostConnectionInfo(host).connection_keys.insert(connection_key);
+
+  // The replacement is dialed immediately (0ms) rather than waiting for the periodic tick.
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(0), _));
+
+  io_handle_->markTunnelDrainingAndDialReplacement(connection_key);
+
+  // The draining tunnel is no longer tracked, leaving a deficit for the maintenance loop to fill.
+  EXPECT_FALSE(getHostConnectionInfo(host).connection_keys.contains(connection_key));
+}
+
+// Unset maintain_interval uses the historical 10s re-check. initializeFileEvent immediately
+// runs maintainReverseConnections, which re-arms the retry timer with that interval plus
+// 15% upward jitter: 10000 + 3999 % 1500 = 10999.
+TEST_F(ReverseConnectionIOHandleTest, DefaultMaintainInterval) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  uint64_t retry_timeout =
+      ReverseConnectionUtility::addJitter(10000, 15, extension_->randomGenerator());
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(retry_timeout), _));
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+}
+
+// The interval is only visible when the handle re-arms its retry timer, so this goes through
+// createBootstrapExtension + socket() and checks the first enableTimer. 5s plus the fixture's
+// fixed jitter is 5000 + 3999 % 750 = 5249. The unique_ptr is kept so the initiator's cached
+// raw pointer stays valid.
+TEST_F(ReverseConnectionIOHandleTest, MaintainIntervalPassedOnFromExtension) {
+  auto socket_interface = std::make_unique<ReverseTunnelInitiator>(context_);
+  envoy::extensions::bootstrap::reverse_tunnel::downstream_socket_interface::v3::
+      DownstreamReverseConnectionSocketInterface extension_config;
+  extension_config.mutable_maintain_interval()->set_seconds(5);
+  auto extension = socket_interface->createBootstrapExtension(extension_config, context_);
+  ASSERT_NE(extension, nullptr);
+
+  ReverseConnectionAddress::ReverseConnectionConfig config;
+  config.src_cluster_id = "test-cluster";
+  config.src_node_id = "test-node";
+  config.src_tenant_id = "test-tenant";
+  config.remote_cluster = "remote-cluster";
+  config.connection_count = 1;
+
+  auto reverse_address = std::make_shared<ReverseConnectionAddress>(config);
+  auto socket = socket_interface->socket(Network::Socket::Type::Stream, reverse_address,
+                                         Network::SocketCreationOptions{});
+  ASSERT_NE(socket, nullptr);
+  auto* reverse_handle = dynamic_cast<ReverseConnectionIOHandle*>(socket.get());
+  ASSERT_NE(reverse_handle, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  uint64_t retry_timeout =
+      ReverseConnectionUtility::addJitter(5000, 15, extension_->randomGenerator());
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(retry_timeout), _));
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  reverse_handle->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                      Event::FileReadyType::Read);
+}
+
+// Draining an unknown connection key is a benign no-op: nothing is dropped and no immediate
+// replacement dial is triggered.
+TEST_F(ReverseConnectionIOHandleTest, MarkTunnelDrainingUnknownKeyIsNoOp) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  EXPECT_CALL(*mock_timer, enableTimer(_, _)).Times(testing::AnyNumber());
+  // An unknown key must not arm an immediate (0ms) replacement dial.
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(0), _)).Times(0);
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+
+  io_handle_->markTunnelDrainingAndDialReplacement("203.0.113.9:9999");
+}
+
+// Closing a connection key that is no longer tracked (e.g. it was already dropped when the tunnel
+// began draining) is a benign no-op and must not crash.
+TEST_F(ReverseConnectionIOHandleTest, OnDownstreamConnectionClosedUnknownKeyIsNoOp) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  io_handle_->onDownstreamConnectionClosed("203.0.113.9:9999", /*connection_id=*/0);
+  EXPECT_TRUE(getHostToConnInfoMap().empty());
+}
+
+// Listener stop must destroy the retry timer and block replacement dials.
+TEST_F(ReverseConnectionIOHandleTest, ResetFileEventsStopsReplacementDialOnListenerStop) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  // Set expectations before resetFileEvents() destroys the timer.
+  EXPECT_CALL(*mock_timer, enableTimer(_, _)).Times(testing::AnyNumber());
+  EXPECT_CALL(*mock_timer, enableTimer(std::chrono::milliseconds(0), _)).Times(0);
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+
+  const std::string host = "192.168.1.1";
+  const std::string connection_key = "192.168.1.1:12345";
+  addHostConnectionInfo(host, "remote-cluster", 1);
+  getMutableHostConnectionInfo(host).connection_keys.insert(connection_key);
+
+  // Simulate worker-thread listener teardown.
+  io_handle_->resetFileEvents();
+
+  // Drop tracking without dialing a replacement.
+  io_handle_->markTunnelDrainingAndDialReplacement(connection_key);
+
+  EXPECT_EQ(getHostConnectionInfo(host).connection_keys.count(connection_key), 0);
+}
+
+// Listener stop must shut down in-flight handshake wrappers on the worker. close() is expected
+// once, from RCConnectionWrapper::shutdown() (not a second time from resetFileEvents()).
+TEST_F(ReverseConnectionIOHandleTest, ResetFileEventsShutsDownHandshakeWrappers) {
+  setupThreadLocalSlot();
+
+  auto config = createDefaultTestConfig();
+  io_handle_ = createTestIOHandle(config);
+  ASSERT_NE(io_handle_, nullptr);
+
+  auto* mock_timer = new NiceMock<Event::MockTimer>();
+  EXPECT_CALL(dispatcher_, createTimer_(_)).WillOnce(Return(mock_timer));
+  EXPECT_CALL(*mock_timer, enableTimer(_, _)).Times(testing::AnyNumber());
+
+  Event::FileReadyCb mock_callback = [](uint32_t) -> absl::Status { return absl::OkStatus(); };
+  io_handle_->initializeFileEvent(dispatcher_, mock_callback, Event::FileTriggerType::Level,
+                                  Event::FileReadyType::Read);
+
+  auto mock_connection = setupMockConnection();
+  EXPECT_CALL(*mock_connection, close(Network::ConnectionCloseType::NoFlush));
+  EXPECT_CALL(*mock_connection, state()).WillRepeatedly(Return(Network::Connection::State::Open));
+  EXPECT_CALL(*mock_connection, id()).WillRepeatedly(Return(42));
+
+  auto mock_host = std::make_shared<NiceMock<Upstream::MockHostDescription>>();
+  auto wrapper = std::make_unique<RCConnectionWrapper>(*io_handle_, std::move(mock_connection),
+                                                       mock_host, "test-cluster");
+  addWrapperToHostMap(wrapper.get(), "192.168.1.1");
+  pushConnectionWrapper(std::move(wrapper));
+  ASSERT_EQ(getConnectionWrappers().size(), 1);
+
+  const size_t deferred_before = dispatcher_.to_delete_.size();
+  io_handle_->resetFileEvents();
+
+  EXPECT_TRUE(getConnectionWrappers().empty());
+  EXPECT_TRUE(getConnWrapperToHostMap().empty());
+  // shutdown() deferred-deletes the connection; resetFileEvents() deferred-deletes the wrapper.
+  EXPECT_EQ(dispatcher_.to_delete_.size(), deferred_before + 2);
 }
 
 } // namespace ReverseConnection

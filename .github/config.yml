@@ -4,16 +4,16 @@ build-image:
   repo: docker.io/envoyproxy/envoy-build
   repo-gcr: gcr.io/envoy-ci/envoy-build
   # default ci caching (ci)
-  sha: 1133b78586d5764929a46d024e74f5f9b200828d5b2c7e987377818f4a31cac2
-  sha-ci: 1133b78586d5764929a46d024e74f5f9b200828d5b2c7e987377818f4a31cac2
-  sha-devtools: 37d5b16264319c1d0991de02eb9b488016ed9b3c5a04df97e041b99a45d9ed39
-  sha-docker: 588854d3e7e72a7ebd89a92f5ce99af687e6fdd77239afbe0b9ef6cf430c53fd
-  sha-gcc: 4b63777fd1fdf0c5b8d00a0f19840c28839ed2c85d1b8f51354c26e4516bcaf5
-  sha-mobile: 70f936a9770ddb75943c760fe7a28deb53226cced31289412bb850ad8e7cb8de
-  sha-worker: e539b366b3385c83b1a9b6bda377d399caee596565419fab0cfac6993610177c
+  sha: 0fa203f090138434505a5f1269a8d2bb4a47b885facb4ef5e6dc0c9f861d2aba
+  sha-ci: 0fa203f090138434505a5f1269a8d2bb4a47b885facb4ef5e6dc0c9f861d2aba
+  sha-devtools: 7cbfd3c61439d510f5e21fcca6b08fcd6616b1d13ebd85d7550ecf4bfd8e3d23
+  sha-docker: b5fd90b42869e24c22110f4bd925ad30c30e8410d6cad2d5203ced628dd3dfdf
+  sha-gcc: 990d51067b5d2c23988a058a653605983216a6fe128feecd44d389e60a83b54e
+  sha-mobile: f5b988fc8b80be5c0e439981d681fe2a25afef147b397d5d8799a6eb0274cd67
+  sha-worker: 382f86d26825767ce9cf68dd168e23728863792af1b81f73afcb14a38a586016
   # TODO: remove this dupe (currently used by ci request handler)
-  mobile-sha: 70f936a9770ddb75943c760fe7a28deb53226cced31289412bb850ad8e7cb8de
-  tag: v0.1.5
+  mobile-sha: f5b988fc8b80be5c0e439981d681fe2a25afef147b397d5d8799a6eb0274cd67
+  tag: v0.2.3
 
 config:
   envoy:
@@ -35,6 +35,7 @@ checks:
     on-run:
     - check-build
     - check-build-openssl
+    - check-build-openssl-presubmit
     - check-coverage
     - check-runtime
     - check-san
@@ -89,11 +90,6 @@ checks:
     required: true
     on-run:
     - mobile-ios-tests
-  mobile-perf:
-    name: Mobile/Perf
-    required: true
-    on-run:
-    - mobile-perf
   mobile-python:
     name: Mobile/Python
     required: true
@@ -186,6 +182,20 @@ run:
   check-build-openssl:
     paths:
     - "**/*"
+  check-build-openssl-presubmit:
+    paths:
+    - compat/openssl/**/*
+    - source/common/tls/**/*
+    - source/common/crypto/**/*
+    - source/extensions/transport_sockets/tls/**/*
+    - test/common/tls/**/*
+    - test/common/crypto/**/*
+    - test/extensions/transport_sockets/tls/**/*
+    - envoy/ssl/**/*
+    - envoy/extensions/transport_sockets/tls/**/*
+    - bazel/**/*
+    - .bazelrc
+    - ci/do_ci.sh
   check-coverage:
     paths:
     - "**/*"

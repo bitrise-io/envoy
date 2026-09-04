@@ -197,7 +197,8 @@ public:
 
     context_manager_ = std::make_unique<Extensions::TransportSockets::Tls::ContextManagerImpl>(
         server_factory_context_);
-    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_);
+    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_,
+                                                          &server_factory_context_.serverScope());
   }
 
   std::unique_ptr<RawConnectionDriver> createConnectionAndWrite(const std::string& alpn,
@@ -417,7 +418,7 @@ public:
           ->mutable_route()
           ->set_cluster("cluster_1");
       hcm_config.mutable_stat_prefix()->assign("hcm1");
-      config_blob->PackFrom(hcm_config);
+      std::ignore = config_blob->PackFrom(hcm_config);
       bootstrap.mutable_static_resources()->mutable_clusters()->Add()->MergeFrom(
           *bootstrap.mutable_static_resources()->mutable_clusters(0));
       bootstrap.mutable_static_resources()->mutable_clusters(1)->set_name("cluster_1");
@@ -467,7 +468,8 @@ public:
 
     context_manager_ = std::make_unique<Extensions::TransportSockets::Tls::ContextManagerImpl>(
         server_factory_context_);
-    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_);
+    context_ = Ssl::createClientSslTransportSocketFactory({}, *context_manager_, *api_,
+                                                          &server_factory_context_.serverScope());
     address_ = Ssl::getSslAddress(version_, lookupPort("http"));
   }
 
@@ -869,7 +871,7 @@ protected:
         tls_context.mutable_common_tls_context()->add_tls_certificate_sds_secret_configs();
     setUpSdsConfig(secret_config, CLIENT_CERT_NAME, cluster_name, cluster_upstream);
     transport_socket->set_name("envoy.transport_sockets.tls");
-    transport_socket->mutable_typed_config()->PackFrom(tls_context);
+    std::ignore = transport_socket->mutable_typed_config()->PackFrom(tls_context);
   }
 
   void initXdsStream(FakeUpstream& upstream, FakeHttpConnectionPtr& connection,

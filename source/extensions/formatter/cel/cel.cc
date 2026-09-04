@@ -18,7 +18,7 @@ namespace Expr = Filters::Common::Expr;
 
 CELFormatter::CELFormatter(const ::Envoy::LocalInfo::LocalInfo& local_info,
                            Expr::BuilderInstanceSharedConstPtr expr_builder,
-                           const cel::expr::Expr& input_expr, absl::optional<size_t>& max_length,
+                           const cel::expr::Expr& input_expr, std::optional<size_t>& max_length,
                            bool typed)
     : local_info_(local_info), max_length_(max_length), compiled_expr_([&]() {
         auto compiled_expr = Expr::CompiledExpression::Create(expr_builder, input_expr);
@@ -30,14 +30,14 @@ CELFormatter::CELFormatter(const ::Envoy::LocalInfo::LocalInfo& local_info,
       }()),
       typed_(typed) {}
 
-absl::optional<std::string> CELFormatter::format(const Envoy::Formatter::Context& context,
-                                                 const StreamInfo::StreamInfo& stream_info) const {
+std::optional<std::string> CELFormatter::format(const Envoy::Formatter::Context& context,
+                                                const StreamInfo::StreamInfo& stream_info) const {
   Protobuf::Arena arena;
   auto eval_status =
       compiled_expr_.evaluate(arena, &local_info_, stream_info, context.requestHeaders().ptr(),
                               context.responseHeaders().ptr(), context.responseTrailers().ptr());
   if (!eval_status.has_value() || eval_status.value().IsError()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   const auto result = Expr::print(eval_status.value());
   if (max_length_) {
@@ -76,14 +76,46 @@ Protobuf::Value CELFormatter::formatValue(const Envoy::Formatter::Context& conte
   }
 }
 
-::Envoy::Formatter::FormatterProviderPtr
+bool CELFormatter::formatTo(std::string& sink, const Envoy::Formatter::Context& context,
+                            const StreamInfo::StreamInfo& stream_info) const {
+  const std::optional<std::string> value = format(context, stream_info);
+  if (!value.has_value()) {
+    return false;
+  }
+  sink.append(*value);
+  return true;
+}
+
+void CELFormatter::formatValueTo(Envoy::Formatter::ValueSink& sink,
+                                 const Envoy::Formatter::Context& context,
+                                 const StreamInfo::StreamInfo& stream_info) const {
+  if (!typed_) {
+    // The untyped form is always a string.
+    const std::optional<std::string> value = format(context, stream_info);
+    if (!value.has_value()) {
+      return;
+    }
+    sink.addString(*value);
+    return;
+  }
+  // The typed form produces a genuine proto value, so hand it to the sink as one.
+  const Protobuf::Value value = formatValue(context, stream_info);
+  if (value.kind_case() == Protobuf::Value::kNullValue ||
+      value.kind_case() == Protobuf::Value::KIND_NOT_SET) {
+    return;
+  }
+  sink.addValue(value);
+}
+
+absl::StatusOr<Envoy::Formatter::FormatterProviderPtr>
 CELFormatterCommandParser::parse(absl::string_view command, absl::string_view subcommand,
-                                 absl::optional<size_t> max_length) const {
+                                 std::optional<size_t> max_length) const {
 #if defined(USE_CEL_PARSER)
   if (command == "CEL" || command == "TYPED_CEL") {
     auto parse_status = google::api::expr::parser::Parse(subcommand);
     if (!parse_status.ok()) {
-      throw EnvoyException("Not able to parse expression: " + parse_status.status().ToString());
+      return absl::InvalidArgumentError(
+          absl::StrCat("Not able to parse expression: ", parse_status.status().ToString()));
     }
     Server::Configuration::ServerFactoryContext& context =
         Server::Configuration::ServerFactoryContextInstance::get();
@@ -94,7 +126,7 @@ CELFormatterCommandParser::parse(absl::string_view command, absl::string_view su
 
   return nullptr;
 #else
-  throw EnvoyException("CEL is not available for use in this environment.");
+  return absl::UnimplementedError("CEL is not available for use in this environment.");
 #endif
 }
 

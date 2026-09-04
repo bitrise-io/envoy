@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <memory>
+#include <optional>
 
 #include "envoy/buffer/buffer.h"
 #include "envoy/config/core/v3/base.pb.h"
@@ -17,7 +18,6 @@
 #include "source/extensions/filters/common/processing_effect/processing_effect.h"
 
 #include "absl/status/status.h"
-#include "absl/types/optional.h"
 #include "matching_utils.h"
 
 namespace Envoy {
@@ -43,7 +43,7 @@ public:
   bool empty() const { return queue_.empty(); }
   void push(Buffer::Instance& data, bool end_stream);
   void clear();
-  absl::optional<QueuedChunk> pop(Buffer::OwnedImpl& out_data);
+  std::optional<QueuedChunk> pop(Buffer::OwnedImpl& out_data);
   const QueuedChunk& consolidate();
   Buffer::OwnedImpl& receivedData() { return received_data_; }
   const std::deque<QueuedChunk>& queue() const { return queue_; }
@@ -89,6 +89,7 @@ public:
       const std::vector<std::string>& untyped_forwarding_namespaces,
       const std::vector<std::string>& typed_forwarding_namespaces,
       const std::vector<std::string>& untyped_receiving_namespaces,
+      const std::vector<std::string>& typed_receiving_namespaces,
       const std::vector<std::string>& untyped_cluster_metadata_forwarding_namespaces,
       const std::vector<std::string>& typed_cluster_metadata_forwarding_namespaces,
       bool allow_content_length_header)
@@ -97,6 +98,7 @@ public:
         untyped_forwarding_namespaces_(&untyped_forwarding_namespaces),
         typed_forwarding_namespaces_(&typed_forwarding_namespaces),
         untyped_receiving_namespaces_(&untyped_receiving_namespaces),
+        typed_receiving_namespaces_(&typed_receiving_namespaces),
         untyped_cluster_metadata_forwarding_namespaces_(
             &untyped_cluster_metadata_forwarding_namespaces),
         typed_cluster_metadata_forwarding_namespaces_(
@@ -124,6 +126,12 @@ public:
   void setBodyReceived(bool b) { body_received_ = b; }
   bool partialBodyProcessed() const { return partial_body_processed_; }
 
+  // Check whether external processing is configured.
+  virtual bool noExternalProcess() const {
+    return !send_headers_ && !send_trailers_ &&
+           body_mode_ == envoy::extensions::filters::http::ext_proc::v3::ProcessingMode::NONE;
+  }
+
   virtual void setProcessingMode(
       const envoy::extensions::filters::http::ext_proc::v3::ProcessingMode& mode) PURE;
 
@@ -146,6 +154,13 @@ public:
   };
   void setUntypedReceivingMetadataNamespaces(const std::vector<std::string>& ns) {
     untyped_receiving_namespaces_ = &ns;
+  };
+
+  const std::vector<std::string>& typedReceivingMetadataNamespaces() const {
+    return *typed_receiving_namespaces_;
+  };
+  void setTypedReceivingMetadataNamespaces(const std::vector<std::string>& ns) {
+    typed_receiving_namespaces_ = &ns;
   };
   const std::vector<std::string>& untypedClusterMetadataForwardingNamespaces() const {
     return *untyped_cluster_metadata_forwarding_namespaces_;
@@ -172,6 +187,9 @@ public:
   bool trailersSentToServer() const { return trailers_sent_to_server_; }
   void setTrailersSentToServer(bool b) { trailers_sent_to_server_ = b; }
 
+  bool eosSentToServerWithBody() const { return eos_sent_to_server_with_body_; }
+  void setEosSentToServerWithBody(bool b) { eos_sent_to_server_with_body_ = b; }
+
   envoy::extensions::filters::http::ext_proc::v3::ProcessingMode_BodySendMode bodyMode() const {
     return body_mode_;
   }
@@ -183,7 +201,7 @@ public:
   virtual const Http::RequestOrResponseHeaderMap* responseHeaders() const PURE;
   const Http::HeaderMap* responseTrailers() const { return trailers_; }
 
-  const absl::optional<MonotonicTime>& getCallStartTime() const { return call_start_time_; }
+  const std::optional<MonotonicTime>& getCallStartTime() const { return call_start_time_; }
   void onStartProcessorCall(Event::TimerCb cb, std::chrono::milliseconds timeout,
                             CallbackState callback_state, bool send_body);
   void onFinishProcessorCall(Grpc::Status::GrpcStatus call_status,
@@ -222,7 +240,7 @@ public:
   // Move the contents of "data" into a QueuedChunk object on the streaming queue.
   void enqueueStreamingChunk(Buffer::Instance& data, bool end_stream);
   // If the queue has chunks, return the head of the queue.
-  absl::optional<QueuedChunk> dequeueStreamingChunk(Buffer::OwnedImpl& out_data);
+  std::optional<QueuedChunk> dequeueStreamingChunk(Buffer::OwnedImpl& out_data);
   // Consolidate all the chunks on the queue into a single one and return a reference.
   const QueuedChunk& consolidateStreamedChunks() { return chunk_queue_.consolidate(); }
   bool queueOverHighLimit() const { return chunk_queue_.bytesEnqueued() > bufferLimit(); }
@@ -301,6 +319,20 @@ public:
   // a body response is received and processed.
   bool isLastResponseAfterBodyResp(bool eos_seen_in_body) const;
 
+  // Check whether this is the last response from the ext_proc server for this
+  // direction.
+  bool isLastResponseForDirection() const { return last_response_for_direction_; }
+
+  void setLastResponseForDirection(bool last_response_for_direction) {
+    last_response_for_direction_ = last_response_for_direction;
+  }
+
+  // Check for this direction, the external processing is either not configured,
+  // or the last response is already received.
+  bool noMoreExternalProcess() const {
+    return (noExternalProcess() || last_response_for_direction_);
+  }
+
 protected:
   void setBodyMode(
       envoy::extensions::filters::http::ext_proc::v3::ProcessingMode_BodySendMode body_mode);
@@ -350,6 +382,8 @@ protected:
   bool complete_body_available_ : 1 = false;
   // If true, the trailers is already sent to the server.
   bool trailers_sent_to_server_ : 1 = false;
+  // If true, the end_of_stream is already sent to the server with body.
+  bool eos_sent_to_server_with_body_ : 1 = false;
   // If true, then a CONTINUE_AND_REPLACE status was used on a response
   bool body_replaced_ : 1 = false;
   // If true, some of the body data is received.
@@ -368,6 +402,8 @@ protected:
   // If true, the attributes for this processing state have already been sent.
   bool attributes_sent_ : 1 = false;
   const bool allow_content_length_header_ : 1;
+  // If true, this is the last response from the processor for this direction.
+  bool last_response_for_direction_ : 1 = false;
 
   // The request_headers_ field is guaranteed to hold the pointer to the request
   // headers as set in decodeHeaders. This allows both decoding and encoding states
@@ -377,11 +413,12 @@ protected:
   Http::HeaderMap* trailers_ = nullptr;
   Event::TimerPtr message_timer_;
   ChunkQueue chunk_queue_;
-  absl::optional<MonotonicTime> call_start_time_ = absl::nullopt;
+  std::optional<MonotonicTime> call_start_time_ = std::nullopt;
 
   const std::vector<std::string>* untyped_forwarding_namespaces_{};
   const std::vector<std::string>* typed_forwarding_namespaces_{};
   const std::vector<std::string>* untyped_receiving_namespaces_{};
+  const std::vector<std::string>* typed_receiving_namespaces_{};
   const std::vector<std::string>* untyped_cluster_metadata_forwarding_namespaces_{};
   const std::vector<std::string>* typed_cluster_metadata_forwarding_namespaces_{};
 
@@ -511,12 +548,14 @@ public:
       const std::vector<std::string>& untyped_forwarding_namespaces,
       const std::vector<std::string>& typed_forwarding_namespaces,
       const std::vector<std::string>& untyped_receiving_namespaces,
+      const std::vector<std::string>& typed_receiving_namespaces,
       const std::vector<std::string>& untyped_cluster_metadata_forwarding_namespaces,
       const std::vector<std::string>& typed_cluster_metadata_forwarding_namespaces,
       bool allow_content_length_header)
       : ProcessorState(filter, envoy::config::core::v3::TrafficDirection::INBOUND,
                        untyped_forwarding_namespaces, typed_forwarding_namespaces,
-                       untyped_receiving_namespaces, untyped_cluster_metadata_forwarding_namespaces,
+                       untyped_receiving_namespaces, typed_receiving_namespaces,
+                       untyped_cluster_metadata_forwarding_namespaces,
                        typed_cluster_metadata_forwarding_namespaces, allow_content_length_header) {
     setProcessingModeInternal(mode);
   }
@@ -635,6 +674,9 @@ public:
   bool isValidTrailersCallbackState() const override;
   bool canFailOpen() const override;
   bool localResponseStarted() const { return local_response_started_; }
+  bool noExternalProcess() const override {
+    return !local_response_started_ && ProcessorState::noExternalProcess();
+  }
 
 private:
   void setProcessingModeInternal(
@@ -656,12 +698,14 @@ public:
       const std::vector<std::string>& untyped_forwarding_namespaces,
       const std::vector<std::string>& typed_forwarding_namespaces,
       const std::vector<std::string>& untyped_receiving_namespaces,
+      const std::vector<std::string>& typed_receiving_namespaces,
       const std::vector<std::string>& untyped_cluster_metadata_forwarding_namespaces,
       const std::vector<std::string>& typed_cluster_metadata_forwarding_namespaces,
       bool allow_content_length_header)
       : ProcessorState(filter, envoy::config::core::v3::TrafficDirection::OUTBOUND,
                        untyped_forwarding_namespaces, typed_forwarding_namespaces,
-                       untyped_receiving_namespaces, untyped_cluster_metadata_forwarding_namespaces,
+                       untyped_receiving_namespaces, typed_receiving_namespaces,
+                       untyped_cluster_metadata_forwarding_namespaces,
                        typed_cluster_metadata_forwarding_namespaces, allow_content_length_header) {
     setProcessingModeInternal(mode);
   }
@@ -735,9 +779,8 @@ public:
   }
 
   // Check whether external processing is configured in the encoding path.
-  bool noExternalProcess() const {
-    return !local_response_streaming_ && !send_headers_ && !send_trailers_ &&
-           body_mode_ == envoy::extensions::filters::http::ext_proc::v3::ProcessingMode::NONE;
+  bool noExternalProcess() const override {
+    return !local_response_streaming_ && ProcessorState::noExternalProcess();
   }
 
   void setLocalResponseStreaming();

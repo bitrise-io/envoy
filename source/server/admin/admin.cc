@@ -93,7 +93,7 @@ Http::HeaderValidatorFactoryPtr createHeaderValidatorFactory(
 
   ::envoy::config::core::v3::TypedExtensionConfig config;
   config.set_name("default_universal_header_validator_for_admin");
-  config.mutable_typed_config()->PackFrom(uhv_config);
+  std::ignore = config.mutable_typed_config()->PackFrom(uhv_config);
 
   auto* factory = Envoy::Config::Utility::getFactory<Http::HeaderValidatorFactoryConfig>(config);
   ENVOY_BUG(factory != nullptr, "Default UHV is not linked into binary.");
@@ -108,7 +108,8 @@ Http::HeaderValidatorFactoryPtr createHeaderValidatorFactory(
 
 AdminImpl::AdminImpl(const std::string& profile_path, Server::Instance& server,
                      bool ignore_global_conn_limit)
-    : server_(server), listener_info_(std::make_shared<ListenerInfoImpl>()),
+    : server_(server), listener_info_(std::make_shared<ListenerInfoImpl>(
+                           envoy::config::listener::v3::Listener::MODIFY_ONLY)),
       factory_context_(server, listener_info_),
       request_id_extension_(Extensions::RequestId::UUIDRequestIDExtension::defaultInstance(
           server_.api().randomGenerator())),
@@ -169,6 +170,9 @@ AdminImpl::AdminImpl(const std::string& profile_path, Server::Instance& server,
           makeHandler("/heap_dump", "dump current Envoy heap (if supported)",
                       MAKE_ADMIN_HANDLER(tcmalloc_profiling_handler_.handlerHeapDump), false,
                       false),
+          makeHandler("/peak_heap_dump", "dump peak Envoy heap (if supported)",
+                      MAKE_ADMIN_HANDLER(tcmalloc_profiling_handler_.handlerPeakHeapDump), false,
+                      false),
           makeHandler("/allocprofiler", "enable/disable the allocation profiler (if supported)",
                       MAKE_ADMIN_HANDLER(tcmalloc_profiling_handler_.handlerAllocationProfiler),
                       false, true,
@@ -198,6 +202,10 @@ AdminImpl::AdminImpl(const std::string& profile_path, Server::Instance& server,
                         "If fine grain logging is enabled, use __FILE__ or a glob experision as "
                         "the logger name. "
                         "For example, source/common*:warning"},
+                       {Admin::ParamDescriptor::Type::String, "group",
+                        "Change given logger group to desired level, set to "
+                        "<logger_group_name>:<desired_level>. "
+                        "logger_group_name must be a logger name."},
                        {Admin::ParamDescriptor::Type::Enum, "level",
                         "desired logging level, this will change all loggers's level",
                         prepend("", LogsHandler::levelStrings())}}),
@@ -218,8 +226,9 @@ AdminImpl::AdminImpl(const std::string& profile_path, Server::Instance& server,
                 "listeners. This behaviour and duration is configurable via server options "
                 "or CLI"},
                {ParamDescriptor::Type::Boolean, "skip_exit",
-                "When draining listeners, do not exit after the drain period. "
-                "This must be used with graceful"},
+                "When draining listeners, drain the connections but never stop the listeners. The "
+                "graceful parameter has no effect when this is set, since the drain period only "
+                "delays stopping the listeners"},
                {ParamDescriptor::Type::Boolean, "inboundonly",
                 "Drains all inbound listeners. traffic_direction field in "
                 "envoy_v3_api_msg_config.listener.v3.Listener is used to determine whether a "
@@ -238,6 +247,7 @@ AdminImpl::AdminImpl(const std::string& profile_path, Server::Instance& server,
                         "data size)"},
                        {ParamDescriptor::Type::String, "filter",
                         "Regular expression (Google re2) for filtering stats"},
+                       {ParamDescriptor::Type::Boolean, "invert_filter", "Invert the filter regex"},
                        {ParamDescriptor::Type::Enum,
                         "histogram_buckets",
                         "Histogram bucket display mode",
@@ -296,7 +306,7 @@ Http::ServerConnectionPtr AdminImpl::createCodec(Network::Connection& connection
           envoy::config::core::v3::Http2ProtocolOptions())
           .value(),
       maxRequestHeadersKb(), maxRequestHeadersCount(), headersWithUnderscoresAction(),
-      overload_manager);
+      overload_manager, server_.runtime());
 }
 
 bool AdminImpl::createNetworkFilterChain(Network::Connection& connection,
@@ -307,7 +317,7 @@ bool AdminImpl::createNetworkFilterChain(Network::Connection& connection,
       shared_from_this(), server_.drainManager(), server_.api().randomGenerator(),
       server_.httpContext(), server_.runtime(), server_.localInfo(), server_.clusterManager(),
       server_.nullOverloadManager(), server_.timeSource(),
-      envoy::config::core::v3::TrafficDirection::UNSPECIFIED)});
+      envoy::config::core::v3::TrafficDirection::UNSPECIFIED, server_.serverFactoryContext())});
   return true;
 }
 
@@ -548,7 +558,7 @@ void AdminImpl::closeSocket() {
 
 void AdminImpl::addListenerToHandler(Network::ConnectionHandler* handler) {
   if (listener_) {
-    handler->addListener(absl::nullopt, *listener_, server_.runtime(),
+    handler->addListener(std::nullopt, *listener_, server_.runtime(),
                          server_.api().randomGenerator());
   }
 }

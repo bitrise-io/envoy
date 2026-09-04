@@ -41,6 +41,7 @@ envoy_cc_library(
         "//envoy/ssl:context_manager_interface",
         "//source/common/access_log:access_log_lib",
         "//source/common/common:assert_lib",
+        "//source/common/common:base_logger_lib",
         "//source/common/common:minimal_logger_lib",
         "//source/common/common:utility_lib",
         "//source/common/config:runtime_utility_lib",
@@ -146,7 +147,6 @@ envoy_cc_library(
         "//source/common/protobuf:utility_lib",
         "//source/common/stats:symbol_table_lib",
         "//source/common/watchdog:abort_action_config",
-        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/watchdog/v3:pkg_cc_proto",
     ],
@@ -186,6 +186,7 @@ envoy_cc_library(
     deps = [
         ":hot_restarting_base",
         "//envoy/network:parent_drained_callback_registrar_interface",
+        "//source/common/runtime:runtime_features_lib",
         "//source/common/stats:stat_merger_lib",
     ],
 )
@@ -196,6 +197,9 @@ envoy_cc_library(
     hdrs = envoy_select_hot_restart(["hot_restarting_parent.h"]),
     deps = [
         ":hot_restarting_base",
+        "//envoy/network:connection_handler_interface",
+        "//envoy/stats:stats_interface",
+        "//source/common/common:hash_lib",
         "//source/common/memory:stats_lib",
         "//source/common/stats:stat_merger_lib",
         "//source/common/stats:symbol_table_lib",
@@ -239,8 +243,10 @@ envoy_cc_library(
         "//envoy/filesystem:filesystem_interface",
         "//source/common/common:logger_lib",
         "//source/common/filesystem:filesystem_lib",
+        "//source/common/singleton:threadsafe_singleton",
+        "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/types:optional",
+        "@abseil-cpp//absl/synchronization",
     ],
 )
 
@@ -387,8 +393,9 @@ envoy_cc_library(
     name = "server_base_lib",
     srcs = ["server.cc"],
     hdrs = ["server.h"],
-    rbe_pool = "6gig",
+    rbe_pool = "linux_x64_small",
     deps = [
+        ":cgroup_cpu_util_lib",
         ":configuration_lib",
         ":listener_hooks_lib",
         ":listener_manager_factory_lib",
@@ -443,7 +450,6 @@ envoy_cc_library(
         "//source/common/version:version_lib",
         "//source/server/admin:admin_lib",
         "@abseil-cpp//absl/container:node_hash_map",
-        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/admin/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
     ],
@@ -489,6 +495,7 @@ envoy_cc_library(
         "//envoy/api:api_interface",
         "//envoy/event:dispatcher_interface",
         "//envoy/event:timer_interface",
+        "//envoy/network:drain_decision_interface",
         "//envoy/network:exception_interface",
         "//envoy/server:configuration_interface",
         "//envoy/server:guarddog_interface",

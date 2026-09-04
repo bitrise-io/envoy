@@ -103,11 +103,11 @@ protected:
     envoy::config::core::v3::TypedExtensionConfig* custom_handshaker =
         tls_context_.mutable_common_tls_context()->mutable_custom_handshaker();
     custom_handshaker->set_name(HandshakerFactoryImplForTest::kFactoryName);
-    custom_handshaker->mutable_typed_config()->PackFrom(Protobuf::StringValue());
+    std::ignore = custom_handshaker->mutable_typed_config()->PackFrom(Protobuf::StringValue());
   }
 
   NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context_;
-  Stats::IsolatedStoreImpl stats_store_;
+  Stats::IsolatedStoreImpl stats_store_{server_factory_context_.serverScope().symbolTable()};
   std::unique_ptr<Extensions::TransportSockets::Tls::ContextManagerImpl> context_manager_;
   HandshakerFactoryImplForTest handshaker_factory_;
   Registry::InjectFactory<Ssl::HandshakerFactory> registered_factory_;
@@ -260,7 +260,7 @@ protected:
   }
 
   NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context_;
-  Stats::IsolatedStoreImpl stats_store_;
+  Stats::IsolatedStoreImpl stats_store_{server_factory_context_.serverScope().symbolTable()};
   std::unique_ptr<Extensions::TransportSockets::Tls::ContextManagerImpl> context_manager_;
   envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext tls_context_;
   Ssl::HandshakerCapabilities capabilities_;
@@ -278,7 +278,7 @@ TEST_F(HandshakerFactoryDownstreamTest, ServerHandshakerProvidesCertificates) {
   envoy::config::core::v3::TypedExtensionConfig* custom_handshaker =
       tls_context_.mutable_common_tls_context()->mutable_custom_handshaker();
   custom_handshaker->set_name(HandshakerFactoryImplForDownstreamTest::kFactoryName);
-  custom_handshaker->mutable_typed_config()->PackFrom(Protobuf::BoolValue());
+  std::ignore = custom_handshaker->mutable_typed_config()->PackFrom(Protobuf::BoolValue());
 
   CustomProcessObjectForTest custom_process_object_for_test(
       /*cb=*/[](SSL_CTX* ssl_ctx) { SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1); });

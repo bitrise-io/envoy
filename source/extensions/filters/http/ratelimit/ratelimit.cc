@@ -271,6 +271,13 @@ void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
   }
 
   if (status == Filters::Common::RateLimit::LimitStatus::OverLimit && config_->enforced()) {
+    if (descriptor_statuses != nullptr && !descriptor_statuses->empty()) {
+      if (response_headers_to_add_ == nullptr) {
+        response_headers_to_add_ = Http::ResponseHeaderMapImpl::create();
+      }
+      populateRetryAfterHeader(*descriptor_statuses, *response_headers_to_add_,
+                               config_->enableRetryAfterHeader());
+    }
     state_ = State::Responded;
     callbacks_->streamInfo().setResponseFlag(StreamInfo::CoreResponseFlag::RateLimited);
     callbacks_->sendLocalReply(
@@ -292,7 +299,7 @@ void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
     } else {
       state_ = State::Responded;
       callbacks_->streamInfo().setResponseFlag(StreamInfo::CoreResponseFlag::RateLimitServiceError);
-      callbacks_->sendLocalReply(config_->statusOnError(), response_body, nullptr, absl::nullopt,
+      callbacks_->sendLocalReply(config_->statusOnError(), response_body, nullptr, std::nullopt,
                                  RcDetails::get().RateLimitError);
     }
   } else if (!initiating_call_) {

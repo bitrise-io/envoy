@@ -114,7 +114,7 @@ MockRouteEntry::MockRouteEntry()
   ON_CALL(*this, upgradeMap()).WillByDefault(ReturnRef(upgrade_map_));
   ON_CALL(*this, hedgePolicy()).WillByDefault(ReturnRef(hedge_policy_));
   ON_CALL(*this, connectConfig()).WillByDefault(Invoke([this]() {
-    return connect_config_.has_value() ? makeOptRef(connect_config_.value()) : absl::nullopt;
+    return connect_config_.has_value() ? makeOptRef(connect_config_.value()) : std::nullopt;
   }));
   ON_CALL(*this, earlyDataPolicy()).WillByDefault(ReturnRef(early_data_policy_));
   ON_CALL(*this, pathMatcher()).WillByDefault(ReturnRef(path_matcher_));
@@ -136,6 +136,7 @@ MockConfig::MockConfig() : route_(new NiceMock<MockRoute>()) {
   ON_CALL(*this, usesVhds()).WillByDefault(Return(false));
   ON_CALL(*this, metadata()).WillByDefault(ReturnRef(metadata_));
   ON_CALL(*this, typedMetadata()).WillByDefault(ReturnRef(typed_metadata_));
+  ON_CALL(*this, ignorePathParametersInPathMatching()).WillByDefault(Return(false));
 }
 
 MockConfig::~MockConfig() = default;
@@ -188,7 +189,7 @@ MockRoute::MockRoute() {
   ON_CALL(*this, connectConfig()).WillByDefault(Invoke([this]() {
     return route_entry_.connect_config_.has_value()
                ? makeOptRef(route_entry_.connect_config_.value())
-               : absl::nullopt;
+               : std::nullopt;
   }));
   ON_CALL(*this, earlyDataPolicy()).WillByDefault(ReturnRef(route_entry_.early_data_policy_));
   ON_CALL(*this, pathMatcher()).WillByDefault(ReturnRef(route_entry_.path_matcher_));
@@ -207,6 +208,9 @@ MockRouteConfigProvider::~MockRouteConfigProvider() = default;
 
 MockRouteConfigProviderManager::MockRouteConfigProviderManager() = default;
 MockRouteConfigProviderManager::~MockRouteConfigProviderManager() = default;
+
+MockVhdsConfigUpdateReceiver::MockVhdsConfigUpdateReceiver() = default;
+MockVhdsConfigUpdateReceiver::~MockVhdsConfigUpdateReceiver() = default;
 
 MockScopedConfig::MockScopedConfig() {
   ON_CALL(*this, getRouteConfig(_)).WillByDefault(Return(route_config_));

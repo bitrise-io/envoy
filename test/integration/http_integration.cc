@@ -44,7 +44,9 @@
 #include "test/integration/utility.h"
 #include "test/mocks/upstream/cluster_info.h"
 #include "test/test_common/environment.h"
+#include "test/test_common/logging.h"
 #include "test/test_common/network_utility.h"
+#include "test/test_common/status_utility.h"
 
 #include "absl/time/time.h"
 #include "base_integration_test.h"
@@ -265,8 +267,8 @@ IntegrationCodecClientPtr HttpIntegrationTest::makeHttpConnection(uint32_t port)
 
 IntegrationCodecClientPtr HttpIntegrationTest::makeRawHttpConnection(
     Network::ClientConnectionPtr&& conn,
-    absl::optional<envoy::config::core::v3::Http2ProtocolOptions> http2_options,
-    absl::optional<envoy::config::core::v3::HttpProtocolOptions> common_http_options,
+    std::optional<envoy::config::core::v3::Http2ProtocolOptions> http2_options,
+    std::optional<envoy::config::core::v3::HttpProtocolOptions> common_http_options,
     bool wait_till_connected) {
   std::shared_ptr<Upstream::MockClusterInfo> cluster{new NiceMock<Upstream::MockClusterInfo>()};
   cluster->max_response_headers_count_ = 200;
@@ -316,7 +318,7 @@ IntegrationCodecClientPtr HttpIntegrationTest::makeRawHttpConnection(
 
 IntegrationCodecClientPtr
 HttpIntegrationTest::makeHttpConnection(Network::ClientConnectionPtr&& conn) {
-  auto codec = makeRawHttpConnection(std::move(conn), absl::nullopt);
+  auto codec = makeRawHttpConnection(std::move(conn), std::nullopt);
   EXPECT_TRUE(codec->connected()) << codec->connection()->transportFailureReason();
   return codec;
 }
@@ -476,7 +478,7 @@ HttpIntegrationTest::Result HttpIntegrationTest::sendRequestAndWaitForResponse(
   } else {
     response = codec_client_->makeHeaderOnlyRequest(request_headers);
   }
-  absl::optional<uint64_t> index = waitForNextUpstreamRequest(upstream_indices, timeout);
+  std::optional<uint64_t> index = waitForNextUpstreamRequest(upstream_indices, timeout);
   // Send response headers, and end_stream if there is no response body.
   upstream_request_->encodeHeaders(response_headers, response_body_size == 0);
   // Send any response data, with end_stream true.
@@ -505,13 +507,35 @@ void HttpIntegrationTest::cleanupUpstreamAndDownstream() {
   // will interpret that as an unexpected disconnect. The codec client is not
   // subject to the same failure mode.
   if (fake_upstream_connection_) {
-    AssertionResult result = fake_upstream_connection_->close();
+    AssertionResult result = AssertionSuccess();
+    const bool is_http3 = fake_upstream_connection_->type() == Http::CodecType::HTTP3;
+    if (is_http3) {
+      // QUIC connections do not support half-close.
+      result = fake_upstream_connection_->close();
+    } else {
+      // A local close only proves that the fake upstream dispatcher closed its socket. Initiate a
+      // fake-upstream FIN; closing the downstream below also makes TCP proxy and CONNECT paths that
+      // enable upstream half-close fully close their paired upstream.
+      result = fake_upstream_connection_->halfCloseForCleanup();
+    }
     RELEASE_ASSERT(result, result.message());
+    if (codec_client_) {
+      codec_client_->close();
+    }
     result = fake_upstream_connection_->waitForDisconnect();
     RELEASE_ASSERT(result, result.message());
+
+    // Envoy closes its socket before raising connection callbacks, so run a worker barrier after
+    // observing its close to ensure the callback has removed the connection from its connection
+    // pool. Some fixtures stop the server before cleaning up their fake upstreams; they cannot
+    // issue another request, so no worker barrier is needed.
+    if (!is_http3 && test_server_) {
+      test_server_->waitForWorkerThreads();
+    }
+    result = fake_upstream_connection_->waitForNoPost();
+    RELEASE_ASSERT(result, result.message());
     fake_upstream_connection_.reset();
-  }
-  if (codec_client_) {
+  } else if (codec_client_) {
     codec_client_->close();
   }
 }
@@ -520,7 +544,7 @@ void HttpIntegrationTest::sendRequestAndVerifyResponse(
     const Http::TestRequestHeaderMapImpl& request_headers, const int request_size,
     const Http::TestResponseHeaderMapImpl& response_headers, const int response_size,
     const int backend_idx,
-    absl::optional<const Http::TestResponseHeaderMapImpl> expected_response_headers) {
+    std::optional<const Http::TestResponseHeaderMapImpl> expected_response_headers) {
   codec_client_ = makeHttpConnection(lookupPort("http"));
   auto response = sendRequestAndWaitForResponse(request_headers, request_size, response_headers,
                                                 response_size, backend_idx);
@@ -552,7 +576,7 @@ void HttpIntegrationTest::verifyResponse(IntegrationStreamDecoderPtr response,
   EXPECT_EQ(response->body(), expected_body);
 }
 
-absl::optional<uint64_t> HttpIntegrationTest::waitForNextUpstreamConnection(
+std::optional<uint64_t> HttpIntegrationTest::waitForNextUpstreamConnection(
     const std::vector<uint64_t>& upstream_indices,
     std::chrono::milliseconds connection_wait_timeout,
     FakeHttpConnectionPtr& fake_upstream_connection) {
@@ -576,10 +600,10 @@ absl::optional<uint64_t> HttpIntegrationTest::waitForNextUpstreamConnection(
   return {};
 }
 
-absl::optional<uint64_t>
+std::optional<uint64_t>
 HttpIntegrationTest::waitForNextUpstreamRequest(const std::vector<uint64_t>& upstream_indices,
                                                 std::chrono::milliseconds connection_wait_timeout) {
-  absl::optional<uint64_t> upstream_with_request;
+  std::optional<uint64_t> upstream_with_request;
   // If there is no upstream connection, wait for it to be established.
   if (!fake_upstream_connection_) {
     upstream_with_request = waitForNextUpstreamConnection(upstream_indices, connection_wait_timeout,
@@ -1005,7 +1029,7 @@ void HttpIntegrationTest::testRouterRetryOnResetBeforeRequestAfterHeaders() {
   auto response = std::move(encoder_decoder.second);
   auto status = request_encoder_->encodeHeaders(headers, false);
   // Make sure we transmit headers successfully
-  ASSERT_TRUE(status.ok());
+  ASSERT_OK(status);
   ASSERT_TRUE(upstream_request_->waitForHeadersComplete());
   // Reset the upstream connection after the headers have been sent
   ASSERT_TRUE(fake_upstream_connection_->close());
@@ -1418,6 +1442,12 @@ void HttpIntegrationTest::testLargeRequestHeaders(uint32_t size, uint32_t count,
         hcm.mutable_max_request_headers_kb()->set_value(max_size);
         hcm.mutable_common_http_protocol_options()->mutable_max_headers_count()->set_value(
             max_count);
+        // Disable route timeout to prevent 504 on slow CI (#44416).
+        auto* route = hcm.mutable_route_config()
+                          ->mutable_virtual_hosts(0)
+                          ->mutable_routes(0)
+                          ->mutable_route();
+        route->mutable_timeout()->set_seconds(0);
       });
   setMaxRequestHeadersKb(max_size);
   setMaxRequestHeadersCount(max_count);
@@ -1505,7 +1535,7 @@ void HttpIntegrationTest::testLargeResponseHeaders(uint32_t size, uint32_t count
   }
 
   initialize();
-  codec_client_ = makeRawHttpConnection(makeClientConnection(lookupPort("http")), absl::nullopt,
+  codec_client_ = makeRawHttpConnection(makeClientConnection(lookupPort("http")), std::nullopt,
                                         client_protocol_options);
   reinterpret_cast<AutonomousUpstream*>(fake_upstreams_.front().get())
       ->setResponseHeaders(std::make_unique<Http::TestResponseHeaderMapImpl>(big_headers));

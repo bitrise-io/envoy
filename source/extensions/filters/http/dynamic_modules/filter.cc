@@ -3,6 +3,10 @@
 #include <cstdint>
 #include <memory>
 
+#include "envoy/event/dispatcher.h"
+
+#include "source/common/event/deferred_task.h"
+
 #include "absl/container/inlined_vector.h"
 
 namespace Envoy {
@@ -10,7 +14,10 @@ namespace Extensions {
 namespace DynamicModules {
 namespace HttpFilters {
 
-DynamicModuleHttpFilter::~DynamicModuleHttpFilter() { destroy(); }
+DynamicModuleHttpFilter::~DynamicModuleHttpFilter() {
+  // In a well-formed filter chain onDestroy() has already run and this is a no-op.
+  destroy();
+}
 
 void DynamicModuleHttpFilter::initializeInModuleFilter() {
   ASSERT(in_module_filter_ == nullptr);
@@ -33,6 +40,8 @@ void DynamicModuleHttpFilter::onStreamComplete() {
 
 void DynamicModuleHttpFilter::onDestroy() {
   destroyed_ = true;
+  // Read before the cache is cleared below, because destroy() defers the module hook onto it.
+  OptRef<Event::Dispatcher> worker_dispatcher = makeOptRefFromPtr(dispatcher());
   // Clear the cached dispatcher so any concurrent foreign-thread `commit()` short-circuits.
   cached_dispatcher_.store(nullptr, std::memory_order_release);
   // Pair with the register in maybeRegisterDownstreamWatermarkCallbacks(); the underlying
@@ -41,15 +50,16 @@ void DynamicModuleHttpFilter::onDestroy() {
     decoder_callbacks_->removeDownstreamWatermarkCallbacks(*this);
     downstream_watermark_callbacks_registered_ = false;
   }
-  destroy();
+  destroy(worker_dispatcher);
 };
 
-void DynamicModuleHttpFilter::destroy() {
+void DynamicModuleHttpFilter::destroy(OptRef<Event::Dispatcher> dispatcher) {
   if (in_module_filter_ == nullptr) {
     return;
   }
 
-  config_->on_http_filter_destroy_(in_module_filter_);
+  // Detach from the module first so that nothing below can re-enter an event hook.
+  const envoy_dynamic_module_type_http_filter_module_ptr in_module_filter = in_module_filter_;
   in_module_filter_ = nullptr;
 
   // Cancel all pending one-shot callouts.
@@ -79,12 +89,27 @@ void DynamicModuleHttpFilter::destroy() {
   decoder_callbacks_ = nullptr;
   encoder_callbacks_ = nullptr;
   downstream_watermark_callbacks_registered_ = false;
+
+  // A module event hook can end the stream, which tears the filter chain down on the module's own
+  // stack, so the in-module filter has to outlive that hook. Deferring the destroy hook also keeps
+  // this filter alive, since the module can still call back into it from the hook.
+  if (dispatcher.has_value()) {
+    if (DynamicModuleHttpFilterSharedPtr self = weak_from_this().lock()) {
+      Event::DeferredTaskUtil::deferredRun(
+          *dispatcher, [self = std::move(self), in_module_filter]() {
+            self->config_->on_http_filter_destroy_(in_module_filter);
+          });
+      return;
+    }
+  }
+  config_->on_http_filter_destroy_(in_module_filter);
 }
 
 FilterHeadersStatus DynamicModuleHttpFilter::decodeHeaders(RequestHeaderMap&, bool end_of_stream) {
   const envoy_dynamic_module_type_on_http_filter_request_headers_status status =
       config_->on_http_filter_request_headers_(thisAsVoidPtr(), in_module_filter_, end_of_stream);
-  in_continue_ = status == envoy_dynamic_module_type_on_http_filter_request_headers_status_Continue;
+  decode_in_continue_ =
+      status == envoy_dynamic_module_type_on_http_filter_request_headers_status_Continue;
   return static_cast<FilterHeadersStatus>(status);
 };
 
@@ -93,27 +118,28 @@ FilterDataStatus DynamicModuleHttpFilter::decodeData(Buffer::Instance& chunk, bo
   const envoy_dynamic_module_type_on_http_filter_request_body_status status =
       config_->on_http_filter_request_body_(thisAsVoidPtr(), in_module_filter_, end_of_stream);
   current_request_body_ = nullptr;
-  in_continue_ = status == envoy_dynamic_module_type_on_http_filter_request_body_status_Continue;
+  decode_in_continue_ =
+      status == envoy_dynamic_module_type_on_http_filter_request_body_status_Continue;
   return static_cast<FilterDataStatus>(status);
 };
 
 FilterTrailersStatus DynamicModuleHttpFilter::decodeTrailers(RequestTrailerMap&) {
   const envoy_dynamic_module_type_on_http_filter_request_trailers_status status =
       config_->on_http_filter_request_trailers_(thisAsVoidPtr(), in_module_filter_);
-  in_continue_ =
+  decode_in_continue_ =
       status == envoy_dynamic_module_type_on_http_filter_request_trailers_status_Continue;
   return static_cast<FilterTrailersStatus>(status);
 }
 
 FilterMetadataStatus DynamicModuleHttpFilter::decodeMetadata(MetadataMap&) {
-  in_continue_ = true;
+  decode_in_continue_ = true;
   return FilterMetadataStatus::Continue;
 }
 
 void DynamicModuleHttpFilter::decodeComplete() {}
 
 Filter1xxHeadersStatus DynamicModuleHttpFilter::encode1xxHeaders(ResponseHeaderMap&) {
-  in_continue_ = true;
+  encode_in_continue_ = true;
   return Filter1xxHeadersStatus::Continue;
 }
 
@@ -123,7 +149,7 @@ FilterHeadersStatus DynamicModuleHttpFilter::encodeHeaders(ResponseHeaderMap&, b
   }
   const envoy_dynamic_module_type_on_http_filter_response_headers_status status =
       config_->on_http_filter_response_headers_(thisAsVoidPtr(), in_module_filter_, end_of_stream);
-  in_continue_ =
+  encode_in_continue_ =
       status == envoy_dynamic_module_type_on_http_filter_response_headers_status_Continue;
   return static_cast<FilterHeadersStatus>(status);
 };
@@ -136,7 +162,8 @@ FilterDataStatus DynamicModuleHttpFilter::encodeData(Buffer::Instance& chunk, bo
   const envoy_dynamic_module_type_on_http_filter_response_body_status status =
       config_->on_http_filter_response_body_(thisAsVoidPtr(), in_module_filter_, end_of_stream);
   current_response_body_ = nullptr;
-  in_continue_ = status == envoy_dynamic_module_type_on_http_filter_response_body_status_Continue;
+  encode_in_continue_ =
+      status == envoy_dynamic_module_type_on_http_filter_response_body_status_Continue;
   return static_cast<FilterDataStatus>(status);
 };
 
@@ -146,22 +173,37 @@ FilterTrailersStatus DynamicModuleHttpFilter::encodeTrailers(ResponseTrailerMap&
   }
   const envoy_dynamic_module_type_on_http_filter_response_trailers_status status =
       config_->on_http_filter_response_trailers_(thisAsVoidPtr(), in_module_filter_);
-  in_continue_ =
+  encode_in_continue_ =
       status == envoy_dynamic_module_type_on_http_filter_response_trailers_status_Continue;
   return static_cast<FilterTrailersStatus>(status);
 };
 
 FilterMetadataStatus DynamicModuleHttpFilter::encodeMetadata(MetadataMap&) {
-  in_continue_ = true;
+  encode_in_continue_ = true;
   return FilterMetadataStatus::Continue;
 }
 
 void DynamicModuleHttpFilter::sendLocalReply(
     Code code, absl::string_view body,
     std::function<void(ResponseHeaderMap& headers)> modify_headers,
-    const absl::optional<Grpc::Status::GrpcStatus> grpc_status, absl::string_view details) {
+    const std::optional<Grpc::Status::GrpcStatus> grpc_status, absl::string_view details) {
   sent_local_reply_ = true;
   decoder_callbacks_->sendLocalReply(code, body, modify_headers, grpc_status, details);
+}
+
+void DynamicModuleHttpFilter::sendResponseHeaders(ResponseHeaderMapPtr&& headers, bool end_stream) {
+  sent_local_reply_ = true;
+  decoder_callbacks_->encodeHeaders(std::move(headers), end_stream, "");
+}
+
+void DynamicModuleHttpFilter::sendResponseData(Buffer::Instance& data, bool end_stream) {
+  sent_local_reply_ = true;
+  decoder_callbacks_->encodeData(data, end_stream);
+}
+
+void DynamicModuleHttpFilter::sendResponseTrailers(ResponseTrailerMapPtr&& trailers) {
+  sent_local_reply_ = true;
+  decoder_callbacks_->encodeTrailers(std::move(trailers));
 }
 
 void DynamicModuleHttpFilter::encodeComplete() {};
@@ -170,6 +212,10 @@ envoy_dynamic_module_type_http_callout_init_result
 DynamicModuleHttpFilter::sendHttpCallout(uint64_t* callout_id_out, absl::string_view cluster_name,
                                          Http::RequestMessagePtr&& message,
                                          uint64_t timeout_milliseconds) {
+  // A callout registered after destroy() has drained the pending ones would never be cancelled.
+  if (destroyed_) {
+    return envoy_dynamic_module_type_http_callout_init_result_CannotCreateRequest;
+  }
   Upstream::ThreadLocalCluster* cluster =
       config_->cluster_manager_.getThreadLocalCluster(cluster_name);
   if (!cluster) {
@@ -180,9 +226,9 @@ DynamicModuleHttpFilter::sendHttpCallout(uint64_t* callout_id_out, absl::string_
 
   // Prepare the callback and the ID.
   const uint64_t callout_id = getNextCalloutId();
-  auto http_callout_callabck =
+  auto http_callout_callback =
       std::make_unique<DynamicModuleHttpFilter::HttpCalloutCallback>(*this, callout_id);
-  DynamicModuleHttpFilter::HttpCalloutCallback& callback = *http_callout_callabck;
+  DynamicModuleHttpFilter::HttpCalloutCallback& callback = *http_callout_callback;
 
   auto request = cluster->httpAsyncClient().send(std::move(message), callback, options);
   if (!request) {
@@ -191,7 +237,7 @@ DynamicModuleHttpFilter::sendHttpCallout(uint64_t* callout_id_out, absl::string_
 
   // Register the callout.
   callback.request_ = request;
-  http_callouts_.emplace(callout_id, std::move(http_callout_callabck));
+  http_callouts_.emplace(callout_id, std::move(http_callout_callback));
   *callout_id_out = callout_id;
 
   return envoy_dynamic_module_type_http_callout_init_result_Success;
@@ -281,16 +327,16 @@ void DynamicModuleHttpFilter::onScheduled(uint64_t event_id) {
 }
 
 void DynamicModuleHttpFilter::continueDecoding() {
-  if (decoder_callbacks_ && !in_continue_) {
+  if (decoder_callbacks_ && !decode_in_continue_) {
     decoder_callbacks_->continueDecoding();
-    in_continue_ = true;
+    decode_in_continue_ = true;
   }
 }
 
 void DynamicModuleHttpFilter::continueEncoding() {
-  if (encoder_callbacks_ && !in_continue_) {
+  if (encoder_callbacks_ && !encode_in_continue_) {
     encoder_callbacks_->continueEncoding();
-    in_continue_ = true;
+    encode_in_continue_ = true;
   }
 }
 
@@ -310,6 +356,10 @@ envoy_dynamic_module_type_http_callout_init_result
 DynamicModuleHttpFilter::startHttpStream(uint64_t* stream_id_out, absl::string_view cluster_name,
                                          Http::RequestMessagePtr&& message, bool end_stream,
                                          uint64_t timeout_milliseconds) {
+  // A stream started after destroy() has drained the pending ones would never be reset.
+  if (destroyed_) {
+    return envoy_dynamic_module_type_http_callout_init_result_CannotCreateRequest;
+  }
   // Get the cluster.
   Upstream::ThreadLocalCluster* cluster =
       config_->cluster_manager_.getThreadLocalCluster(cluster_name);

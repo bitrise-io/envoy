@@ -15,6 +15,7 @@
 #include "source/common/quic/quic_ssl_connection_info.h"
 #include "source/common/quic/quic_stat_names.h"
 #include "source/common/quic/send_buffer_monitor.h"
+#include "source/common/runtime/runtime_features.h"
 #include "source/common/stream_info/stream_info_impl.h"
 
 #include "quiche/quic/core/quic_connection.h"
@@ -101,9 +102,9 @@ public:
     return network_connection_->connectionSocket()->connectionInfoProviderSharedPtr();
   }
   // Unix domain socket is not supported.
-  absl::optional<Network::Connection::UnixDomainSocketPeerCredentials>
+  std::optional<Network::Connection::UnixDomainSocketPeerCredentials>
   unixSocketPeerCredentials() const override {
-    return absl::nullopt;
+    return std::nullopt;
   }
   void setConnectionStats(const Network::Connection::ConnectionStats& stats) override {
     // TODO(danzh): populate stats.
@@ -144,10 +145,10 @@ public:
   const StreamInfo::StreamInfo& streamInfo() const override { return *stream_info_; }
   absl::string_view transportFailureReason() const override { return transport_failure_reason_; }
   bool startSecureTransport() override { return false; }
-  absl::optional<std::chrono::milliseconds> lastRoundTripTime() const override;
+  std::optional<std::chrono::milliseconds> lastRoundTripTime() const override;
   void configureInitialCongestionWindow(uint64_t bandwidth_bits_per_sec,
                                         std::chrono::microseconds rtt) override;
-  absl::optional<uint64_t> congestionWindowInBytes() const override;
+  std::optional<uint64_t> congestionWindowInBytes() const override;
   const Network::ConnectionSocketPtr& getSocket() const override { PANIC("not implemented"); }
 
   // Network::FilterManagerConnection
@@ -179,6 +180,12 @@ public:
   void setMaxIncomingHeadersCount(uint32_t max_headers_count) {
     max_headers_count_ = max_headers_count;
   }
+
+#ifndef ENVOY_ENABLE_UHV
+  // Latched value of the `validate_upstream_headers` runtime feature, read once per connection
+  // and consulted per stream when validating request headers.
+  bool shouldValidateUpstreamHeaders() const { return validate_upstream_headers_; }
+#endif
 
   void incrementSentQuicResetStreamErrorStats(quic::QuicResetStreamError error, bool from_self,
                                               bool is_upstream);
@@ -233,13 +240,17 @@ private:
   std::string transport_failure_reason_;
   uint64_t bytes_to_send_{0};
   uint32_t max_headers_count_{std::numeric_limits<uint32_t>::max()};
+#ifndef ENVOY_ENABLE_UHV
+  const bool validate_upstream_headers_{
+      Runtime::runtimeFeatureEnabled("envoy.reloadable_features.validate_upstream_headers")};
+#endif
   // Keeps the buffer state of the connection, and react upon the changes of how many bytes are
   // buffered cross all streams' send buffer. The state is evaluated and may be changed upon each
   // stream write. QUICHE doesn't buffer data in connection, all the data is buffered in stream's
   // send buffer.
   EnvoyQuicSimulatedWatermarkBuffer write_buffer_watermark_simulation_;
   Buffer::OwnedImpl empty_buffer_;
-  absl::optional<Network::ConnectionCloseType> close_type_during_initialize_;
+  std::optional<Network::ConnectionCloseType> close_type_during_initialize_;
 };
 
 } // namespace Quic

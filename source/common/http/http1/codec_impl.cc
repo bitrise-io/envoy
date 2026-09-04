@@ -141,7 +141,7 @@ void ResponseEncoderImpl::encode1xxHeaders(const ResponseHeaderMap& headers) {
 }
 
 void StreamEncoderImpl::encodeHeadersBase(const RequestOrResponseHeaderMap& headers,
-                                          absl::optional<uint64_t> status, bool end_stream,
+                                          std::optional<uint64_t> status, bool end_stream,
                                           bool bodiless_request) {
   HeaderKeyFormatterOptConstRef formatter(headers.formatter());
   if (!formatter.has_value()) {
@@ -437,7 +437,7 @@ void ResponseEncoderImpl::encodeHeaders(const ResponseHeaderMap& headers, bool e
     is_response_to_connect_request_ = false;
   }
 
-  encodeHeadersBase(headers, absl::make_optional<uint64_t>(numeric_status), end_stream, false);
+  encodeHeadersBase(headers, std::make_optional<uint64_t>(numeric_status), end_stream, false);
 }
 
 static constexpr absl::string_view REQUEST_POSTFIX = " HTTP/1.1\r\n";
@@ -451,7 +451,9 @@ Status RequestEncoderImpl::encodeHeaders(const RequestHeaderMap& headers, bool e
   // downstream codecs decode.
   RETURN_IF_ERROR(HeaderUtility::checkRequiredRequestHeaders(headers));
   // Verify that a filter hasn't added an invalid header key or value.
-  RETURN_IF_ERROR(HeaderUtility::checkValidRequestHeaders(headers));
+  if (connection_.shouldValidateUpstreamHeaders()) {
+    RETURN_IF_ERROR(HeaderUtility::checkValidRequestHeaders(headers));
+  }
 #endif
 
   const HeaderEntry* method = headers.Method();
@@ -506,7 +508,7 @@ Status RequestEncoderImpl::encodeHeaders(const RequestHeaderMap& headers, bool e
         {method->value().getStringView(), SPACE, host_or_path_view, REQUEST_POSTFIX});
   }
 
-  encodeHeadersBase(headers, absl::nullopt, end_stream,
+  encodeHeadersBase(headers, std::nullopt, end_stream,
                     HeaderUtility::requestShouldHaveNoBody(headers));
   return okStatus();
 }
@@ -533,7 +535,13 @@ ConnectionImpl::ConnectionImpl(Network::Connection& connection, CodecStats& stat
                                uint32_t max_headers_kb, const uint32_t max_headers_count)
     : connection_(connection), stats_(stats), codec_settings_(settings),
       encode_only_header_key_formatter_(encodeOnlyFormatterFromSettings(settings)),
-      max_headers_kb_(max_headers_kb), max_headers_count_(max_headers_count) {
+      max_headers_kb_(max_headers_kb), max_headers_count_(max_headers_count)
+#ifndef ENVOY_ENABLE_UHV
+      ,
+      validate_upstream_headers_(
+          Runtime::runtimeFeatureEnabled("envoy.reloadable_features.validate_upstream_headers"))
+#endif
+{
   parser_ = std::make_unique<BalsaParser>(type, this, max_headers_kb_ * 1024, enableTrailers(),
                                           codec_settings_.allow_custom_methods_);
 }
@@ -1401,7 +1409,7 @@ Status ServerConnectionImpl::sendProtocolError(absl::string_view details) {
     ENVOY_BUG(decoder != nullptr, "RequestDecoder is null in sendProtocolError");
     if (decoder) {
       decoder->sendLocalReply(error_code_, CodeUtility::toString(error_code_), nullptr,
-                              absl::nullopt, details);
+                              std::nullopt, details);
     }
   }
   return okStatus();
@@ -1462,7 +1470,7 @@ void ServerConnectionImpl::ActiveRequest::dumpState(std::ostream& os, int indent
 
 ClientConnectionImpl::ClientConnectionImpl(Network::Connection& connection, CodecStats& stats,
                                            ConnectionCallbacks&, const Http1Settings& settings,
-                                           absl::optional<uint16_t> max_response_headers_kb,
+                                           std::optional<uint16_t> max_response_headers_kb,
                                            const uint32_t max_response_headers_count,
                                            bool passing_through_proxy)
     : ConnectionImpl(connection, stats, settings, MessageType::Response,

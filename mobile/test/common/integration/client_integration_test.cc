@@ -18,6 +18,7 @@
 #include "test/extensions/filters/http/dynamic_forward_proxy/test_resolver.h"
 #include "test/integration/autonomous_upstream.h"
 #include "test/test_common/registry.h"
+#include "source/common/common/logger.h"
 #include "test/test_common/test_random_generator.h"
 #include "test/test_common/threadsafe_singleton_injector.h"
 
@@ -45,14 +46,14 @@ namespace {
 // www.lyft.com -> fake test upstream.
 class TestKeyValueStore : public Envoy::Platform::KeyValueStore {
 public:
-  absl::optional<std::string> read(const std::string&) override {
+  std::optional<std::string> read(const std::string&) override {
     ASSERT(!value_.empty());
     return value_;
   }
   void save(std::string, std::string) override {}
   void remove(const std::string&) override {}
-  void addOrUpdate(absl::string_view, absl::string_view, absl::optional<std::chrono::seconds>) {}
-  absl::optional<absl::string_view> get(absl::string_view) { return {}; }
+  void addOrUpdate(absl::string_view, absl::string_view, std::optional<std::chrono::seconds>) {}
+  std::optional<absl::string_view> get(absl::string_view) { return {}; }
   void flush() {}
   void iterate(::Envoy::KeyValueStore::ConstIterateCb) const {}
   void setValue(std::string value) { value_ = value; }
@@ -86,7 +87,11 @@ public:
     Extensions::TransportSockets::Tls::forceRegisterDefaultCertValidatorFactory();
   }
 
+  ~ClientIntegrationTest() override { Logger::Context::changeAllLogLevels(spdlog::level::info); }
+
   void initialize() override {
+    builder_.setLogLevel(log_level_);
+    Logger::Context::changeAllLogLevels(static_cast<spdlog::level::level_enum>(log_level_));
     builder_.enableWorkerThread(getUseWorkerThread());
     if (getUseWorkerThread()) {
       // Platform cert validation is disabled when using worker thread. The engine will use the
@@ -95,10 +100,10 @@ public:
     }
     // Integration test starts upstreams before Envoy which can cause a data race.
     builder_.enableLogger(false);
-    builder_.setLogLevel(Logger::Logger::trace);
     builder_.addRuntimeGuard("dns_cache_set_ip_version_to_remove", true);
     builder_.addRuntimeGuard("quic_no_tcp_delay", true);
     builder_.addRuntimeGuard("mobile_use_network_observer_registry", true);
+    builder_.addRuntimeGuard("getaddrinfo_no_ai_flags", true);
 
     if (getCodecType() == Http::CodecType::HTTP3) {
       setUpstreamProtocol(Http::CodecType::HTTP3);
@@ -212,6 +217,7 @@ public:
   }
 
 protected:
+  Logger::Levels log_level_ = Logger::Levels::info;
   std::unique_ptr<test::SystemHelperPeer::Handle> helper_handle_;
   bool add_quic_hints_ = false;
   bool add_fake_dns_ = false;
@@ -290,23 +296,23 @@ TEST_P(ClientIntegrationTest, Basic) {
 #if not defined(__APPLE__)
 TEST_P(ClientIntegrationTest, DisableDnsRefreshOnFailure) {
   std::atomic<bool> found_cache_miss{false};
-  LogExpectation log_expect(
-      Envoy::GetLogSink(), [&](Logger::Logger::Levels, const std::string& msg) {
-        if (msg.find("ignoring failed address cache hit for miss for host 'doesnotexist") !=
-            std::string::npos) {
-          found_cache_miss = true;
-        }
-      });
+  LogExpectation log_expect(Envoy::GetLogSink(), [&](Logger::Levels, const std::string& msg) {
+    if (msg.find("ignoring failed address cache hit for miss for host 'doesnotexist") !=
+        std::string::npos) {
+      found_cache_miss = true;
+    }
+  });
 
   // Configure MockDnsResolver with "doesnotexist" as a non-existent domain
   envoy::config::core::v3::TypedExtensionConfig dns_resolver_config;
   dns_resolver_config.set_name("envoy.test.mock_dns_resolver");
   envoy::test::mock_dns_resolver::v3::MockDnsResolverConfig config;
   config.add_non_existent_domains("doesnotexist");
-  dns_resolver_config.mutable_typed_config()->PackFrom(config);
+  std::ignore = dns_resolver_config.mutable_typed_config()->PackFrom(config);
   builder_.setDnsResolver(dns_resolver_config);
 
   builder_.setDisableDnsRefreshOnFailure(true);
+  log_level_ = Logger::Levels::debug;
   initialize();
 
   default_request_headers_.setHost("doesnotexist");
@@ -326,13 +332,13 @@ TEST_P(ClientIntegrationTest, DisableDnsRefreshOnFailure) {
 
 TEST_P(ClientIntegrationTest, DisableDnsRefreshOnNetworkChange) {
   std::atomic<bool> found_force_dns_refresh{false};
-  LogExpectation log_expect(
-      Envoy::GetLogSink(), [&](Logger::Logger::Levels, const std::string& msg) {
-        if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
-          found_force_dns_refresh = true;
-        }
-      });
+  LogExpectation log_expect(Envoy::GetLogSink(), [&](Logger::Levels, const std::string& msg) {
+    if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
+      found_force_dns_refresh = true;
+    }
+  });
   builder_.setDisableDnsRefreshOnNetworkChange(true);
+  log_level_ = Logger::Levels::debug;
   initialize();
 
   internalEngine()->onDefaultNetworkChanged(1);
@@ -344,15 +350,15 @@ TEST_P(ClientIntegrationTest, HandleNetworkChangeEvents) {
   std::atomic<bool> found_force_dns_refresh{false};
   std::vector<absl::Notification> handled_network_changes(5);
   std::atomic<int> current_change_event{0};
-  LogExpectation log_expect(
-      Envoy::GetLogSink(), [&](Logger::Logger::Levels, const std::string& msg) {
-        if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
-          found_force_dns_refresh = true;
-        } else if (msg.find("Finished the network changed callback") != std::string::npos) {
-          handled_network_changes[current_change_event].Notify();
-        }
-      });
+  LogExpectation log_expect(Envoy::GetLogSink(), [&](Logger::Levels, const std::string& msg) {
+    if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
+      found_force_dns_refresh = true;
+    } else if (msg.find("Finished the network changed callback") != std::string::npos) {
+      handled_network_changes[current_change_event].Notify();
+    }
+  });
   builder_.setDisableDnsRefreshOnNetworkChange(false);
+  log_level_ = Logger::Levels::trace;
   initialize();
 
   // Set the network type to WIFI. This should trigger a network change.
@@ -402,18 +408,17 @@ TEST_P(ClientIntegrationTest, HandleNetworkChangeEvents) {
 TEST_P(ClientIntegrationTest, HandleNetworkChangeEventsAndroid) {
   absl::Notification found_force_dns_refresh;
   std::atomic<bool> handled_network_change{false};
-  LogExpectation log_expect(
-      Envoy::GetLogSink(), [&](Logger::Logger::Levels, const std::string& msg) {
-        if (msg.find("Default network state has been changed. Current net configuration key") !=
-            std::string::npos) {
-          handled_network_change = true;
-        }
-        if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
-          found_force_dns_refresh.Notify();
-        }
-      });
+  LogExpectation log_expect(Envoy::GetLogSink(), [&](Logger::Levels, const std::string& msg) {
+    if (msg.find("Default network state has been changed. Current net configuration key") !=
+        std::string::npos) {
+      handled_network_change = true;
+    }
+    if (msg.find("beginning DNS cache force refresh") != std::string::npos) {
+      found_force_dns_refresh.Notify();
+    }
+  });
   builder_.setDisableDnsRefreshOnNetworkChange(false);
-
+  log_level_ = Logger::Levels::trace;
   initialize();
 
   // A new WIFI network appears and becomes the default network. Even though
@@ -948,27 +953,14 @@ TEST_P(ClientIntegrationTest, ClearTextNotPermitted) {
   default_request_headers_.addCopy(AutonomousStream::EXPECT_REQUEST_SIZE_BYTES,
                                    std::to_string(request_data.length()));
 
-  EnvoyStreamCallbacks stream_callbacks = createDefaultStreamCallbacks();
-  stream_callbacks.on_data_ = [this](const Buffer::Instance& buffer, uint64_t length,
-                                     bool end_stream, envoy_stream_intel) {
-    if (end_stream) {
-      std::string response_body(length, ' ');
-      buffer.copyOut(0, length, response_body.data());
-      EXPECT_EQ(response_body, "Cleartext is not permitted");
-    }
-    cc_.on_data_calls_++;
-  };
-
-  stream_ = createNewStream(std::move(stream_callbacks));
+  stream_ = createNewStream(createDefaultStreamCallbacks());
   stream_->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(default_request_headers_),
                        true);
 
   terminal_callback_.waitReady();
 
-  ASSERT_EQ(cc_.on_headers_calls_, 1);
-  ASSERT_EQ(cc_.status_, "400");
-  ASSERT_EQ(cc_.on_data_calls_, 1);
-  ASSERT_EQ(cc_.on_complete_calls_, 1);
+  ASSERT_EQ(cc_.on_error_calls_, 1);
+  ASSERT_EQ(cc_.on_headers_calls_, 0);
 }
 
 TEST_P(ClientIntegrationTest, BasicHttps) {
@@ -1046,7 +1038,7 @@ TEST_P(ClientIntegrationTest, InvalidDomain) {
   dns_resolver_config.set_name("envoy.test.mock_dns_resolver");
   envoy::test::mock_dns_resolver::v3::MockDnsResolverConfig config;
   config.add_non_existent_domains("www.doesnotexist.com");
-  dns_resolver_config.mutable_typed_config()->PackFrom(config);
+  std::ignore = dns_resolver_config.mutable_typed_config()->PackFrom(config);
   builder_.setDnsResolver(dns_resolver_config);
 
   initialize();
@@ -1102,7 +1094,7 @@ TEST_P(ClientIntegrationTest, InvalidDomainReresolveWithNoAddresses) {
   dns_resolver_config.set_name("envoy.test.mock_dns_resolver");
   envoy::test::mock_dns_resolver::v3::MockDnsResolverConfig config;
   config.add_non_existent_domains("www.doesnotexist.com");
-  dns_resolver_config.mutable_typed_config()->PackFrom(config);
+  std::ignore = dns_resolver_config.mutable_typed_config()->PackFrom(config);
   builder_.setDnsResolver(dns_resolver_config);
 
   initialize();
@@ -1969,7 +1961,8 @@ TEST_P(ClientIntegrationTest, SconeValuePropagation) {
     return;
   }
 
-  const int16_t expected_bandwidth = 127;
+  const int16_t bandwidth_initial = 127;
+  const int16_t bandwidth_throttled = 50;
 
   MockRecvMsgOsSysCalls sys_calls;
   TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> injector(&sys_calls);
@@ -1977,30 +1970,35 @@ TEST_P(ClientIntegrationTest, SconeValuePropagation) {
   builder_.enableScone(true);
   initialize();
 
-  int64_t captured_scone_max_kbps = -1;
-  int64_t captured_scone_timestamp_ms = -1;
+  // 1. Stream 1: Receives initial bandwidth (127 kbps)
+  int64_t captured_scone_max_kbps1 = -1;
+  int64_t captured_scone_timestamp_ms1 = -1;
+  uint64_t connection_id_1 = 0;
 
-  EnvoyStreamCallbacks stream_callbacks = createDefaultStreamCallbacks();
-  stream_callbacks.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool,
-                                     envoy_stream_intel intel) {
+  EnvoyStreamCallbacks stream_callbacks1 = createDefaultStreamCallbacks();
+  stream_callbacks1.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool,
+                                      envoy_stream_intel intel) {
     cc_.on_headers_calls_++;
     cc_.status_ = absl::StrCat(headers.getStatusValue());
-    captured_scone_max_kbps = intel.scone_max_kbps;
-    captured_scone_timestamp_ms = intel.scone_timestamp_ms;
+    captured_scone_max_kbps1 = intel.scone_max_kbps;
+    captured_scone_timestamp_ms1 = intel.scone_timestamp_ms;
+    connection_id_1 = intel.connection_id;
   };
 
-  stream_ = createNewStream(std::move(stream_callbacks));
-  sys_calls.scone_bandwidth_.store(expected_bandwidth);
+  stream_ = createNewStream(std::move(stream_callbacks1));
+  sys_calls.scone_bandwidth_.store(bandwidth_initial);
   stream_->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(default_request_headers_),
                        true);
-
   cc_.terminal_callback_->waitReady();
 
-  EXPECT_EQ(captured_scone_max_kbps, expected_bandwidth);
-  EXPECT_GT(captured_scone_timestamp_ms, 0);
+  EXPECT_EQ(captured_scone_max_kbps1, bandwidth_initial);
+  EXPECT_GT(captured_scone_timestamp_ms1, 0);
 
+  // 2. Stream 2: Same connection, inherits bandwidth_initial without new packet
   int64_t captured_scone_max_kbps2 = -1;
   int64_t captured_scone_timestamp_ms2 = -1;
+  uint64_t connection_id_2 = 0;
+
   EnvoyStreamCallbacks stream_callbacks2 = createDefaultStreamCallbacks();
   stream_callbacks2.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool,
                                       envoy_stream_intel intel) {
@@ -2008,19 +2006,47 @@ TEST_P(ClientIntegrationTest, SconeValuePropagation) {
     cc_.status_ = absl::StrCat(headers.getStatusValue());
     captured_scone_max_kbps2 = intel.scone_max_kbps;
     captured_scone_timestamp_ms2 = intel.scone_timestamp_ms;
+    connection_id_2 = intel.connection_id;
   };
 
   ConditionalInitializer terminal_callback2;
   cc_.terminal_callback_ = &terminal_callback2;
-
   auto stream2 = createNewStream(std::move(stream_callbacks2));
   stream2->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(default_request_headers_),
                        true);
-
   terminal_callback2.waitReady();
 
-  EXPECT_EQ(captured_scone_max_kbps2, expected_bandwidth);
-  EXPECT_GT(captured_scone_timestamp_ms2, 0);
+  EXPECT_EQ(captured_scone_max_kbps2, bandwidth_initial);
+  EXPECT_EQ(captured_scone_timestamp_ms2, captured_scone_timestamp_ms1);
+  EXPECT_EQ(connection_id_2, connection_id_1);
+
+  // 3. Stream 3: Bandwidth changes dynamically (throttled to 50 kbps)
+  int64_t captured_scone_max_kbps3 = -1;
+  int64_t captured_scone_timestamp_ms3 = -1;
+  uint64_t connection_id_3 = 0;
+
+  EnvoyStreamCallbacks stream_callbacks3 = createDefaultStreamCallbacks();
+  stream_callbacks3.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool,
+                                      envoy_stream_intel intel) {
+    cc_.on_headers_calls_++;
+    cc_.status_ = absl::StrCat(headers.getStatusValue());
+    captured_scone_max_kbps3 = intel.scone_max_kbps;
+    captured_scone_timestamp_ms3 = intel.scone_timestamp_ms;
+    connection_id_3 = intel.connection_id;
+  };
+
+  ConditionalInitializer terminal_callback3;
+  cc_.terminal_callback_ = &terminal_callback3;
+  sys_calls.scone_bandwidth_.store(bandwidth_throttled);
+
+  auto stream3 = createNewStream(std::move(stream_callbacks3));
+  stream3->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(default_request_headers_),
+                       true);
+  terminal_callback3.waitReady();
+
+  EXPECT_EQ(captured_scone_max_kbps3, bandwidth_throttled);
+  EXPECT_GT(captured_scone_timestamp_ms3, captured_scone_timestamp_ms2);
+  EXPECT_EQ(connection_id_3, connection_id_1);
 }
 
 TEST_P(ClientIntegrationTest, SconeValuePropagationDelayed) {
@@ -2170,6 +2196,143 @@ TEST_P(ClientIntegrationTest, SconeValuePropagationMultipleUpdates) {
   upstream_request_->encodeData(0, true);
 
   terminal_callback_.waitReady();
+}
+
+TEST_P(ClientIntegrationTest, SconeDisabled) {
+  if (upstreamProtocol() != Http::CodecType::HTTP3) {
+    return;
+  }
+
+  const int16_t expected_bandwidth = 127;
+
+  MockRecvMsgOsSysCalls sys_calls;
+  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> injector(&sys_calls);
+
+  builder_.enableScone(false);
+  initialize();
+
+  int64_t captured_scone_max_kbps = 0;
+  int64_t captured_scone_timestamp_ms = 0;
+
+  EnvoyStreamCallbacks stream_callbacks = createDefaultStreamCallbacks();
+  stream_callbacks.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool,
+                                     envoy_stream_intel intel) {
+    cc_.on_headers_calls_++;
+    cc_.status_ = absl::StrCat(headers.getStatusValue());
+    captured_scone_max_kbps = intel.scone_max_kbps;
+    captured_scone_timestamp_ms = intel.scone_timestamp_ms;
+  };
+
+  stream_ = createNewStream(std::move(stream_callbacks));
+  sys_calls.scone_bandwidth_.store(expected_bandwidth);
+  stream_->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(default_request_headers_),
+                       true);
+
+  cc_.terminal_callback_->waitReady();
+
+  EXPECT_EQ(captured_scone_max_kbps, -1);
+  EXPECT_EQ(captured_scone_timestamp_ms, -1);
+}
+
+TEST_P(ClientIntegrationTest, DrainConnectionsBySocketTag) {
+  autonomous_upstream_ = false;
+  builder_.enableSocketTagging(true);
+  builder_.enableStatsCollection(true);
+  initialize();
+
+  Platform::EngineSharedPtr engine;
+  {
+    absl::MutexLock l(engine_lock_);
+    engine = engine_;
+  }
+
+  auto send_request_with_tag = [&](int tag_value, ConditionalInitializer& terminal,
+                                   std::string& status) {
+    Buffer::OwnedImpl request_data = Buffer::OwnedImpl("request body");
+    Http::TestRequestHeaderMapImpl request_headers = default_request_headers_;
+    request_headers.addCopy(Http::LowerCaseString("x-envoy-mobile-socket-tag"),
+                            absl::StrCat("0,", tag_value));
+
+    EnvoyStreamCallbacks callbacks;
+    callbacks.on_headers_ = [&](const Http::ResponseHeaderMap& headers, bool, envoy_stream_intel) {
+      status = absl::StrCat(headers.getStatusValue());
+    };
+    callbacks.on_data_ = [](const Buffer::Instance&, uint64_t, bool, envoy_stream_intel) {};
+    callbacks.on_complete_ = [&terminal](envoy_stream_intel, envoy_final_stream_intel) {
+      terminal.setReady();
+    };
+    callbacks.on_error_ = [&terminal](const EnvoyError&, envoy_stream_intel,
+                                      envoy_final_stream_intel) { terminal.setReady(); };
+    callbacks.on_cancel_ = [&terminal](envoy_stream_intel, envoy_final_stream_intel) {
+      terminal.setReady();
+    };
+
+    Platform::StreamSharedPtr stream = createNewStream(std::move(callbacks));
+    stream->sendHeaders(std::make_unique<Http::TestRequestHeaderMapImpl>(request_headers), false);
+    stream->sendData(std::make_unique<Buffer::OwnedImpl>(std::move(request_data)));
+    stream->close(Http::Utility::createRequestTrailerMapPtr());
+    return stream;
+  };
+
+  // 1. First request to establish a connection with socket tag 12345
+  ConditionalInitializer terminal1;
+  std::string status1;
+  auto s1 = send_request_with_tag(12345, terminal1, status1);
+
+  FakeHttpConnectionPtr fake_upstream_connection1;
+  FakeStreamPtr fake_stream1;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForHttpConnection(*BaseIntegrationTest::dispatcher_,
+                                                        fake_upstream_connection1));
+  ASSERT_TRUE(
+      fake_upstream_connection1->waitForNewStream(*BaseIntegrationTest::dispatcher_, fake_stream1));
+  ASSERT_TRUE(fake_stream1->waitForEndStream(*BaseIntegrationTest::dispatcher_));
+  fake_stream1->encodeHeaders(Http::TestResponseHeaderMapImpl({{":status", "200"}}), false);
+  fake_stream1->encodeData(100, true);
+  terminal1.waitReady();
+  ASSERT_EQ(status1, "200");
+
+  // 2. Second request to the same host with a different socket tag 67890
+  ConditionalInitializer terminal2;
+  std::string status2;
+  auto s2 = send_request_with_tag(67890, terminal2, status2);
+
+  FakeHttpConnectionPtr fake_upstream_connection2;
+  FakeStreamPtr fake_stream2;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForHttpConnection(*BaseIntegrationTest::dispatcher_,
+                                                        fake_upstream_connection2));
+  ASSERT_TRUE(
+      fake_upstream_connection2->waitForNewStream(*BaseIntegrationTest::dispatcher_, fake_stream2));
+  ASSERT_TRUE(fake_stream2->waitForEndStream(*BaseIntegrationTest::dispatcher_));
+  fake_stream2->encodeHeaders(Http::TestResponseHeaderMapImpl({{":status", "200"}}), false);
+  fake_stream2->encodeData(100, true);
+  terminal2.waitReady();
+  ASSERT_EQ(status2, "200");
+
+  // 3. Drain only the connections matching the first socket tag 12345
+  engine->drainConnectionsBySocketTag(12345);
+  // Directly verify server-side connection 1 disconnects
+  ASSERT_TRUE(fake_upstream_connection1->waitForDisconnect());
+  // Verify server-side connection 2 remains fully open and connected
+  EXPECT_TRUE(fake_upstream_connection2->connected());
+
+  // 4. Third request to the same host with the second socket tag 67890
+  ConditionalInitializer terminal3;
+  std::string status3;
+  auto s3 = send_request_with_tag(67890, terminal3, status3);
+
+  FakeStreamPtr fake_stream3;
+  ASSERT_TRUE(
+      fake_upstream_connection2->waitForNewStream(*BaseIntegrationTest::dispatcher_, fake_stream3));
+  ASSERT_TRUE(fake_stream3->waitForEndStream(*BaseIntegrationTest::dispatcher_));
+  fake_stream3->encodeHeaders(Http::TestResponseHeaderMapImpl({{":status", "200"}}), false);
+  fake_stream3->encodeData(100, true);
+  terminal3.waitReady();
+
+  ASSERT_EQ(status3, "200");
+  if (fake_upstream_connection2 != nullptr) {
+    ASSERT_TRUE(fake_upstream_connection2->close());
+    ASSERT_TRUE(fake_upstream_connection2->waitForDisconnect());
+  }
 }
 } // namespace
 } // namespace Envoy
